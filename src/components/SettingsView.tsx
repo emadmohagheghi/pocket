@@ -156,6 +156,11 @@ export function SettingsView() {
           </Card>
 
           <Card icon={<Palette className="size-3.5" aria-hidden />} title="Appearance">
+            <Row label="Version">
+              <span className="font-mono text-xs text-muted-foreground">
+                v{__APP_VERSION__}
+              </span>
+            </Row>
             <Row label="Theme">
               <Select
                 value={settings.theme}
