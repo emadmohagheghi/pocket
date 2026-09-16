@@ -266,7 +266,13 @@ export default function MainWindow() {
                   <DropdownMenuItem
                     className="whitespace-nowrap text-orange-600 dark:text-orange-400"
                     disabled={updateState === "downloading"}
-                    onClick={installUpdate}
+                    // Stay open while downloading: the item itself shows the
+                    // progress state ("Downloading…"), so closing the menu
+                    // would hide the only feedback the user gets.
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      installUpdate();
+                    }}
                   >
                     <Download /> {updateState === "downloading" ? "Downloading…" : "New update available"}
                   </DropdownMenuItem>
