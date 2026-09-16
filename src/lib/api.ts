@@ -94,6 +94,9 @@ export const api = {
   importBackup: (path: string) => invoke<ImportSummary>("import_backup", { path }),
 
   openVoiceCapture: () => invoke<void>("open_voice_capture"),
+  /** Download the latest release's installer in the background and launch it.
+   *  The backend exits the app once the installer is running. */
+  installAndLaunchUpdate: () => invoke<void>("install_and_launch_update"),
   log: (message: string) => invoke<void>("frontend_log", { message }).catch(() => {}),
 };
 

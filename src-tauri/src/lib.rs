@@ -7,6 +7,7 @@ mod models;
 mod shortcuts;
 mod storage;
 mod tray;
+mod updater;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -138,6 +139,7 @@ pub fn run() {
             commands::open_url,
             commands::apply_undo,
             commands::frontend_log,
+            updater::install_and_launch_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
