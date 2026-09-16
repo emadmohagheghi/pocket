@@ -31,8 +31,12 @@ import { api } from "@/lib/api";
 import { Toaster, toast } from "@/components/ui/toast";
 import { applyTheme } from "@/lib/theme";
 
-const RELEASES_URL = "https://github.com/emadmohagheghi/Pocket/releases";
 const LATEST_RELEASE_API = "https://api.github.com/repos/emadmohagheghi/Pocket/releases/latest";
+/** Asset name suffixes produced by the release workflow, per platform. */
+const UPDATE_ASSET_SUFFIX =
+  navigator.userAgent.includes("Windows")
+    ? ("x64-setup.exe" as const)
+    : ("amd64.deb" as const);
 
 /** True when `latest` (e.g. "0.2.2") is newer than `current` ("0.2.1"). */
 function isNewerVersion(latest: string, current: string): boolean {
@@ -58,6 +62,9 @@ export default function MainWindow() {
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [updateState, setUpdateState] = useState<"idle" | "downloading" | "done" | "failed">(
+    "idle"
+  );
   const searchInputRef = useRef<HTMLInputElement>(null);
   const alwaysOnTop = settings?.alwaysOnTop ?? false;
 
@@ -76,6 +83,21 @@ export default function MainWindow() {
   const openDataFolder = useCallback(() => {
     void api.openDataFolder().catch(() => {});
   }, []);
+  // One-click update: download the latest installer in the background, run
+  // it, and let the backend exit the app. The download is small and fast
+  // enough that no progress UI is needed — the menu item just flips to a
+  // busy state and a toast reports the outcome.
+  const installUpdate = useCallback(() => {
+    if (updateState === "downloading") return;
+    setUpdateState("downloading");
+    void api
+      .installAndLaunchUpdate()
+      .then(() => setUpdateState("done"))
+      .catch(() => {
+        setUpdateState("failed");
+        toast.add({ title: "Update failed — try again from Releases", type: "error" });
+      });
+  }, [updateState]);
   const closeWindow = useCallback(() => {
     void api.closeWindow().catch(() => {});
   }, []);
@@ -117,10 +139,15 @@ export default function MainWindow() {
         });
         window.clearTimeout(timer);
         if (!res.ok) return;
-        const data = (await res.json()) as { tag_name?: string };
+        const data = (await res.json()) as { tag_name?: string; assets?: { name: string }[] };
         const latest = data.tag_name ?? "";
         const current = __APP_VERSION__;
-        if (!cancelled && latest && isNewerVersion(latest, current)) {
+        // Only offer the in-app update when the latest release actually has
+        // an installer for this platform; otherwise stay quiet.
+        const hasInstaller = (data.assets ?? []).some((a) =>
+          a.name.endsWith(UPDATE_ASSET_SUFFIX)
+        );
+        if (!cancelled && latest && hasInstaller && isNewerVersion(latest, current)) {
           setUpdateAvailable(true);
           toast.add({ title: "New update available", type: "success" });
         }
@@ -238,12 +265,10 @@ export default function MainWindow() {
                 {updateAvailable && (
                   <DropdownMenuItem
                     className="whitespace-nowrap text-orange-600 dark:text-orange-400"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      void api.openUrl(RELEASES_URL).catch(() => {});
-                    }}
+                    disabled={updateState === "downloading"}
+                    onClick={installUpdate}
                   >
-                    <Download /> New update available
+                    <Download /> {updateState === "downloading" ? "Downloading…" : "New update available"}
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem
