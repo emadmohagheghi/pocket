@@ -673,7 +673,7 @@ pub fn copy_to_clipboard(app: AppHandle, text: String) -> AppResult<()> {
 
 #[tauri::command]
 pub fn update_settings(app: AppHandle, patch: SettingsPatch) -> AppResult<Settings> {
-    let (settings, autostart_changed) = {
+    let settings = {
         let store = app.state::<Mutex<Store>>();
         let mut guard = store.lock().unwrap();
         let s = &mut guard.settings;
@@ -713,9 +713,9 @@ pub fn update_settings(app: AppHandle, patch: SettingsPatch) -> AppResult<Settin
         }
         let settings = s.clone();
         guard.persist_settings();
-        (settings, patch.launch_on_startup.is_some())
+        settings
     };
-    if autostart_changed {
+    if patch.launch_on_startup.is_some() {
         apply_autostart(&app);
     }
     if patch.always_on_top.is_some() {
