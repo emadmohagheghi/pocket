@@ -1,6 +1,6 @@
 [package]
 name = "pocket"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["Pocket contributors"]
 description = "A lightweight, privacy-first Windows companion for capturing text and voice notes."
