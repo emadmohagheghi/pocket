@@ -6,6 +6,7 @@ import type {
   InitialState,
   ImportSummary,
   Item,
+  ItemImage,
   ItemType,
   Recording,
   SearchHit,
@@ -34,7 +35,15 @@ export const api = {
 
   createItem: (
     workspaceId: string,
-    item: { itemType: ItemType; content: string; title?: string | null; url?: string | null }
+    item: {
+      itemType: ItemType;
+      content: string;
+      title?: string | null;
+      url?: string | null;
+      images?: ItemImage[];
+      /** Saved recording id to embed in the note (image+voice notes). */
+      recordingId?: string | null;
+    }
   ) => invoke<Item>("create_item", { workspaceId, item }),
   updateItem: (
     workspaceId: string,
@@ -44,10 +53,14 @@ export const api = {
       title?: string | null;
       url?: string | null;
       pinned?: boolean;
+      /** Attach/remove the note's voice recording. */
+      recordingId?: string | null;
     }
   ) => invoke<Item>("update_item", { workspaceId, itemId, patch }),
   deleteItem: (workspaceId: string, itemId: string) =>
     invoke<void>("delete_item", { workspaceId, itemId }),
+  moveItem: (fromWorkspace: string, toWorkspace: string, itemId: string) =>
+    invoke<Item>("move_item", { fromWorkspace, toWorkspace, itemId }),
   deleteEntriesBulk: (
     workspaceId: string,
     itemIds: string[],
@@ -70,6 +83,13 @@ export const api = {
         "x-pocket-workspace": workspaceId,
         "x-pocket-name": encodeURIComponent(name),
         "x-pocket-duration": String(Math.round(durationMs)),
+      },
+    }),
+  saveImage: (workspaceId: string, ext: string, bytes: ArrayBuffer) =>
+    invoke<ItemImage>("save_image", bytes, {
+      headers: {
+        "x-pocket-workspace": workspaceId,
+        "x-pocket-ext": ext,
       },
     }),
   renameRecording: (workspaceId: string, recordingId: string, name: string) =>
@@ -105,6 +125,20 @@ export function voiceUrl(workspaceId: string, file: string): string {
   return isWindows
     ? `http://voice.localhost/${workspaceId}/${file}`
     : `voice://localhost/${workspaceId}/${file}`;
+}
+
+export function imageUrl(workspaceId: string, file: string): string {
+  const isWindows = navigator.userAgent.includes("Windows");
+  return isWindows
+    ? `http://image.localhost/${workspaceId}/${file}`
+    : `image://localhost/${workspaceId}/${file}`;
+}
+
+/** Known file extension of an image MIME type, for backend-side storage. */
+export function extFromMimeType(mime: string): string {
+  if (mime.includes("jpeg")) return "jpg";
+  const match = mime.match(/^image\/(png|gif|webp|bmp|avif)$/);
+  return match ? match[1] : "png";
 }
 
 export function recordingExtension(): string {

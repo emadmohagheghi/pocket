@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "@/lib/api";
 import type {
   Item,
+  ItemImage,
   Recording,
   Settings,
   StateChangedPayload,
@@ -81,7 +82,11 @@ interface PocketStore {
   deleteWorkspace: (id: string) => Promise<void>;
   setActiveWorkspace: (id: string) => Promise<void>;
 
-  createItem: (content: string) => Promise<Item | null>;
+  createItem: (
+    content: string,
+    images?: ItemImage[],
+    recordingId?: string | null
+  ) => Promise<Item | null>;
   updateItem: (itemId: string, patch: Partial<Item>) => Promise<void>;
   deleteItem: (itemId: string) => Promise<void>;
   /** Toggle the todo-style done state (backed by the legacy `pinned`
@@ -231,11 +236,18 @@ export const usePocket = create<PocketStore>((set, get) => ({
     }
   },
 
-  createItem: async (content) => {
+  createItem: async (content, images, recordingId) => {
     const wsId = get().settings?.activeWorkspaceId;
-    if (!wsId || !content.trim()) return null;
+    if (!wsId) return null;
+    // Media-only notes are valid (empty text + attachments / voice).
+    if (!content.trim() && (images?.length ?? 0) === 0 && !recordingId) return null;
     try {
-      const item = await api.createItem(wsId, { itemType: "text", content });
+      const item = await api.createItem(wsId, {
+        itemType: "text",
+        content,
+        images,
+        recordingId: recordingId ?? null,
+      });
       get().recordUndo([
         { type: "removeItem", workspaceId: wsId, itemId: item.id },
       ]);

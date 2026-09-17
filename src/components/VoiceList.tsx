@@ -203,6 +203,91 @@ export function VoiceRow({
 }
 
 /**
+ * Inline player for a note's embedded voice recording (image+voice notes).
+ * Same interaction as a voice row — play/pause, waveform scrub, duration —
+ * but condensed: it lives inside the note card, between text and thumbnails.
+ */
+export function NoteVoicePlayer({
+  wsId,
+  recording,
+}: {
+  wsId: string;
+  recording: Recording;
+}) {
+  const isCurrent = usePocket((s) => s.player?.recordingId === recording.id);
+  const playing = usePocket((s) =>
+    s.player?.recordingId === recording.id ? s.playerPlaying : false
+  );
+  const elapsedSec = usePocket((s) =>
+    s.player?.recordingId === recording.id ? s.playerTime : -1
+  );
+  const playRecording = usePocket((s) => s.playRecording);
+  const togglePlayer = usePocket((s) => s.togglePlayer);
+  const requestPlayerSeek = usePocket((s) => s.requestPlayerSeek);
+  // Real decoded audio peaks, lazily loaded like the voice rows.
+  const { peaks, waveNode, setWaveNode } = useVoicePeaks(
+    recording.id,
+    wsId,
+    recording.file
+  );
+
+  const toggle = () => (isCurrent ? togglePlayer() : playRecording(recording));
+
+  const seekWave = (clientX: number) => {
+    const el = waveNode;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    if (!isCurrent) {
+      playRecording(recording);
+      usePocket.getState().setPlayerScrubbing(true);
+    }
+    requestPlayerSeek(fraction * (recording.durationMs / 1000));
+  };
+
+  const totalMs = recording.durationMs;
+  const shownMs = elapsedSec >= 0 ? elapsedSec * 1000 : totalMs;
+  const progress = totalMs > 0 ? Math.min(1, Math.max(0, shownMs / totalMs)) : 0;
+
+  return (
+    // Clicks stay inside the player: they must not toggle the note's
+    // selection (the parent row selects on plain clicks).
+    <div
+      className="mt-1.5 flex items-center gap-2.5 rounded-xl border border-border/60 bg-muted/30 px-2.5 py-1.5"
+      data-tauri-drag-region="false"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        aria-label={playing ? "Pause" : "Play"}
+        onClick={toggle}
+        className={
+          "flex size-5 shrink-0 items-center justify-center rounded-full transition-colors " +
+          (isCurrent ? "text-foreground" : "text-muted-foreground hover:text-foreground")
+        }
+      >
+        <span className="t-icon-swap size-3.5" data-state={playing ? "b" : "a"}>
+          <Play data-icon="a" className="t-icon size-3.5 translate-x-px" />
+          <Pause data-icon="b" className="t-icon size-3.5" />
+        </span>
+      </button>
+      <VoiceWaveform
+        seed={recording.id}
+        peaks={peaks}
+        progress={progress}
+        active={isCurrent}
+        playing={playing}
+        onSeek={seekWave}
+        setNode={setWaveNode}
+      />
+      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+        {formatDuration(isCurrent && elapsedSec >= 0 ? shownMs : totalMs)}
+      </span>
+    </div>
+  );
+}
+
+/**
  * Invisible audio engine: owns the <audio> element that drives the shared
  * player store. All visible controls live in the voice rows themselves
  * (play button + waveform scrub), so there is no separate player bar.

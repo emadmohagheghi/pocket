@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Loader2, Mic, Pause, Play, Square, X } from "lucide-react";
+import { ImagePlus, Loader2, Mic, Pause, Play, Square, X } from "lucide-react";
 
 import { usePocket } from "@/store";
 import { api } from "@/lib/api";
 import { formatDuration } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
 import { useRecorder } from "@/hooks/useRecorder";
-import type { Item, Recording } from "@/types";
+import type { StagingApi } from "@/hooks/useImageStaging";
+import { imageUrl } from "@/lib/api";
+import type { Item, ItemImage, Recording } from "@/types";
 import type { UndoStep } from "@/store";
 import { ItemRow } from "@/components/ItemRow";
 import { VoiceRow } from "@/components/VoiceList";
@@ -292,18 +294,14 @@ export function ItemList() {
         for (const e of moving) {
           try {
             undoSteps.push({ type: "restoreItem", workspaceId: wsId, item: e.item });
-            const created = await api.createItem(workspaceId, {
-              itemType: "text",
-              content: e.item.content,
-              title: e.item.title,
-              url: e.item.url,
-            });
+            // move_item copies attachments (images / embedded voice) to the
+            // target workspace, so media notes arrive intact.
+            await api.moveItem(wsId, workspaceId, e.item.id);
             undoSteps.push({
               type: "removeItem",
               workspaceId,
-              itemId: created.id,
+              itemId: e.item.id,
             });
-            await api.deleteItem(wsId, e.item.id);
           } catch {
             toast.add({ title: "Move failed", type: "error" });
             return;
@@ -454,7 +452,7 @@ export function ItemList() {
 }
 
 /** Pinned bottom capture bar (rendered outside the scroll flow). */
-export function AddBar() {
+export function AddBar({ staging }: { staging: StagingApi }) {
   const createItem = usePocket((s) => s.createItem);
   const activeWorkspaceId = usePocket((s) => s.settings?.activeWorkspaceId);
   const [value, setValue] = useState("");
@@ -466,13 +464,14 @@ export function AddBar() {
 
   const save = async () => {
     const text = value.trim();
-    if (!text) {
+    if (!text && staging.staged.length === 0) {
       setValue("");
       return;
     }
-    const created = await createItem(text);
+    const created = await createItem(text || " ", staging.staged);
     if (created) {
       setValue("");
+      staging.reset();
       textareaRef.current?.focus();
     }
   };
@@ -490,17 +489,30 @@ export function AddBar() {
         result.durationMs,
         buffer
       );
-      usePocket
-        .getState()
-        .recordUndo([
-          {
-            type: "removeRecording",
-            workspaceId: activeWorkspaceId ?? "",
-            recordingId: saved.id,
-          },
-        ]);
+      if (staging.staged.length > 0) {
+        // Images were staged while recording: fold the voice note into an
+        // image+voice note (no plain text allowed alongside both).
+        const created = await createItem("", staging.staged, saved.id);
+        if (created) {
+          staging.reset();
+          setValue("");
+          textareaRef.current?.focus();
+          toast.add({ title: "Voice + image note saved", type: "success" });
+        }
+      } else {
+        usePocket
+          .getState()
+          .recordUndo([
+            {
+              type: "removeRecording",
+              workspaceId: activeWorkspaceId ?? "",
+              recordingId: saved.id,
+            },
+          ]);
+      }
     } catch (error) {
       void api.log(`voice AddBar save FAILED: ${error}`);
+      toast.add({ title: "Could not save recording", type: "error" });
     } finally {
       setSavingVoice(false);
     }
@@ -516,6 +528,15 @@ export function AddBar() {
         void save();
       }}
     >
+      {staging.staged.length > 0 && (
+        <StagedImageStrip
+          images={staging.staged}
+          busy={staging.busy}
+          onRemove={(index) =>
+            staging.setStaged((current) => current.filter((_, i) => i !== index))
+          }
+        />
+      )}
       <div className={CAPTURE_BAR_CLASS}>
         <AnimatePresence mode="wait" initial={false}>
           {voiceActive ? (
@@ -636,6 +657,14 @@ export function AddBar() {
           </label>
           <button
             type="button"
+            onClick={staging.pickFiles}
+            aria-label="Attach images"
+            className="mt-0 flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ImagePlus className="size-4" />
+          </button>
+          <button
+            type="button"
             onClick={() => {
               void recorder.start();
             }}
@@ -657,5 +686,55 @@ export function AddBar() {
         </p>
       )}
     </form>
+  );
+}
+
+/** Thumbnails of staged (not yet saved) images above the capture textarea. */
+function StagedImageStrip({
+  images,
+  busy,
+  onRemove,
+}: {
+  images: ItemImage[];
+  busy: boolean;
+  onRemove: (index: number) => void;
+}) {
+  const activeWorkspaceId =
+    usePocket((s) => s.settings?.activeWorkspaceId) ?? "";
+  return (
+    <div
+      className="mb-1.5 flex flex-wrap items-center gap-1.5"
+      data-tauri-drag-region="false"
+    >
+      {images.map((image, index) => (
+        <div
+          key={image.id}
+          className="group/staged relative size-16 overflow-hidden rounded-xl border border-border/60 bg-muted/40"
+        >
+          <img
+            src={imageUrl(activeWorkspaceId, image.file)}
+            alt=""
+            draggable={false}
+            className="size-full object-cover"
+          />
+          <button
+            type="button"
+            onClick={() => onRemove(index)}
+            aria-label="Remove image"
+            className="absolute right-0.5 top-0.5 grid size-5 place-items-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover/staged:opacity-100 focus-visible:opacity-100"
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      ))}
+      {busy && (
+        <div
+          className="grid size-16 place-items-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground"
+          aria-label="Attaching image"
+        >
+          <Loader2 className="size-4 animate-spin" />
+        </div>
+      )}
+    </div>
   );
 }

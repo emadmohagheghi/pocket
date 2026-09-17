@@ -13,6 +13,8 @@ import {
 
 import { usePocket } from "@/store";
 import type { FeedActions } from "@/components/ItemList";
+import { NoteImages } from "@/components/NoteImages";
+import { NoteVoicePlayer } from "@/components/VoiceList";
 import { cn, looksLikeUrl } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -383,6 +385,7 @@ export function ItemRow({
               expanded={expanded}
               setExpanded={setExpanded}
               previewRef={previewRef}
+              wsId={activeWorkspaceId ?? ""}
             />
           )}
         </li>
@@ -403,6 +406,7 @@ function ItemBody({
   expanded,
   setExpanded,
   previewRef,
+  wsId,
 }: {
   item: Item;
   done: boolean;
@@ -413,36 +417,43 @@ function ItemBody({
   expanded: boolean;
   setExpanded: (value: boolean | ((current: boolean) => boolean)) => void;
   previewRef: React.RefObject<HTMLParagraphElement | null>;
+  wsId: string;
 }) {
   const open = expanded;
 
   return (
     <div className="min-w-0 flex-1">
-      {canCollapse ? (
-        <CollapsibleItemBody
-          item={item}
-          done={done}
-          open={open}
-          setExpanded={setExpanded}
-          previewStyle={previewStyle}
-          isLink={isLink}
-          previewRef={previewRef}
-        />
-      ) : (
-        <p
-          ref={previewRef}
-          dir="auto"
-          style={previewStyle}
-          className={cn(
-            "whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [overflow-wrap:anywhere]",
-            collapseEnabled && "overflow-hidden [display:-webkit-box] [-webkit-box-orient:vertical]",
-            done && "text-muted-foreground line-through",
-            isLink && !done && "text-primary underline-offset-2 hover:underline"
-          )}
-        >
-          {item.content}
-        </p>
+      {item.content.trim().length > 0 ? (
+        canCollapse ? (
+          <CollapsibleItemBody
+            item={item}
+            done={done}
+            open={open}
+            setExpanded={setExpanded}
+            previewStyle={previewStyle}
+            isLink={isLink}
+            previewRef={previewRef}
+          />
+        ) : (
+          <p
+            ref={previewRef}
+            dir="auto"
+            style={previewStyle}
+            className={cn(
+              "whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [overflow-wrap:anywhere]",
+              collapseEnabled && "overflow-hidden [display:-webkit-box] [-webkit-box-orient:vertical]",
+              done && "text-muted-foreground line-through",
+              isLink && !done && "text-primary underline-offset-2 hover:underline"
+            )}
+          >
+            {item.content}
+          </p>
+        )
+      ) : null}
+      {item.recording && (
+        <NoteVoicePlayer wsId={wsId} recording={item.recording} />
       )}
+      <NoteImages wsId={wsId} images={item.images} />
     </div>
   );
 }

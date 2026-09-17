@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence } from "motion/react";
 import {
   ArrowBigUp,
   FolderOpen,
@@ -16,6 +17,8 @@ import { VoicePlayerEngine } from "@/components/VoiceList";
 import { SettingsDialog } from "@/components/SettingsView";
 import { WorkspacesDialog } from "@/components/WorkspaceSwitcher";
 import { SearchBar } from "@/components/SearchBar";
+import { ImageDropOverlay } from "@/components/ImageDropOverlay";
+import { isImageFile, useImageStaging } from "@/hooks/useImageStaging";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -67,6 +70,42 @@ export default function MainWindow() {
   );
   const searchInputRef = useRef<HTMLInputElement>(null);
   const alwaysOnTop = settings?.alwaysOnTop ?? false;
+
+  // Window-wide image staging: dragging files anywhere over the window and
+  // pasting image files (Ctrl+V) stage them into the capture bar.
+  const staging = useImageStaging();
+  const [dragOver, setDragOver] = useState(false);
+  const dragDepth = useRef(0);
+  const stageFiles = useCallback(
+    (files: readonly File[]) => {
+      void staging
+        .addFiles(files)
+        .then(() => {
+          if (files.some(isImageFile)) {
+            toast.add({ title: "Image attached — add a note or save", type: "success" });
+          }
+        })
+        .catch((error) =>
+          toast.add({
+            title: error instanceof Error ? error.message : "Could not attach image",
+            type: "error",
+          })
+        );
+    },
+    [staging]
+  );
+
+  // Ctrl+V paste: clipboard image files (e.g. screenshots) are staged.
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length === 0) return;
+      event.preventDefault();
+      stageFiles(files);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [stageFiles]);
 
   // Overflow-menu actions, shared between the menu items and their
   // app-focused keyboard shortcuts (Ctrl+Shift+T/W/O/Q, Ctrl+, and
@@ -206,7 +245,29 @@ export default function MainWindow() {
   }, [toggleStayOnTop, openWorkspaces, openSettings, openDataFolder, closeWindow]);
 
   return (
-    <div className="relative h-screen bg-transparent p-3">
+    <div
+      className="relative h-screen bg-transparent p-3"
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        dragDepth.current += 1;
+        setDragOver(true);
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragOver(false);
+      }}
+      onDrop={(event) => {
+        const files = Array.from(event.dataTransfer.files ?? []);
+        event.preventDefault();
+        dragDepth.current = 0;
+        setDragOver(false);
+        if (files.length > 0) stageFiles(files);
+      }}
+    >
       {/* The whole window is draggable by default (see lib/drag-region.ts):
             any press outside an interactive element moves the window, so the
             app background, feed gaps and bar padding all drag. Buttons,
@@ -317,12 +378,17 @@ export default function MainWindow() {
         {/* Invisible audio engine; playback UI lives in the voice rows. */}
         <VoicePlayerEngine />
         <div className="shrink-0 px-3 pb-3 pt-3">
-          <AddBar />
+          <AddBar staging={staging} />
         </div>
+        {/* Hidden file input for the capture bar's attach-images button. */}
+        {staging.fileInput}
       </div>
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <WorkspacesDialog open={workspacesOpen} onClose={() => setWorkspacesOpen(false)} />
+      <AnimatePresence>
+        {dragOver && <ImageDropOverlay />}
+      </AnimatePresence>
       <Toaster />
     </div>
   );

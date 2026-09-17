@@ -1,12 +1,23 @@
 export type ItemType = "text";
 export type EntryKind = "text" | "voice";
 
+/** One image attached to a note. The bytes live in the backend images dir. */
+export interface ItemImage {
+  id: string;
+  /** Generated file name inside the workspace images dir. */
+  file: string;
+  sizeBytes: number;
+}
+
 export interface Item {
   id: string;
   itemType: ItemType;
   content: string;
   title: string | null;
   url: string | null;
+  images: ItemImage[];
+  /** Voice note embedded in this note (image+voice notes); null otherwise. */
+  recording: Recording | null;
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
@@ -65,6 +76,8 @@ export interface ExportSummary {
   recordings: number;
   audioFiles: number;
   missingAudio: number;
+  images: number;
+  missingImages: number;
 }
 
 export interface ImportSummary {
@@ -76,6 +89,8 @@ export interface ImportSummary {
   recordingsSkipped: number;
   audioFilesRestored: number;
   missingAudio: number;
+  imageFilesRestored: number;
+  missingImages: number;
 }
 
 export interface InitialState {
