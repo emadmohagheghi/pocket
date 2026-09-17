@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { imageUrl } from "@/lib/api";
 import { listenViewerState, type ViewerState } from "@/lib/imageViewer";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /**
@@ -17,10 +15,13 @@ import { cn } from "@/lib/utils";
  *   upscaled; a too-big image is contained instead.
  * - Left/right arrows page images; a thumbnail slider at the bottom shows
  *   all images and jumps on click.
+ *
+ * Deliberately animation-free — no mount fade, no page cross-fade, no
+ * backdrop fade: the next image simply replaces the previous one. On a
+ * fullscreen window every one of those transitions read as lag.
  */
 export default function ImageViewerWindow() {
   const [state, setState] = useState<ViewerState | null>(null);
-  const [shown, setShown] = useState(false);
   const index = state ? Math.min(state.index, state.images.length - 1) : 0;
 
   // Hide the actual window (not just the overlay): a transparent, visible
@@ -45,7 +46,6 @@ export default function ImageViewerWindow() {
   useEffect(() => {
     const unlisten = listenViewerState((payload) => {
       setState(payload);
-      setShown(true);
     });
     return () => {
       void unlisten.then((fn) => fn());
@@ -73,41 +73,31 @@ export default function ImageViewerWindow() {
     <div className="relative h-screen w-screen overflow-hidden">
       {/* Dim, blurred backdrop over the desktop. Clicks on it close. */}
       <div
-        className={cn(
-          "absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-200",
-          shown ? "opacity-100" : "opacity-0"
-        )}
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
         onClick={close}
         aria-hidden
       />
 
-      {/* Close button. */}
-      <Button
+      {/* Close button. Plain button: the shared Button variant animates on
+          press (translate-y), which reads as the control sinking away. */}
+      <button
         type="button"
-        size="icon"
-        variant="ghost"
         onClick={close}
         aria-label="Close image viewer"
-        className="absolute right-4 top-4 z-20 size-10 rounded-full text-white/80 hover:bg-white/10 hover:text-white"
+        className="absolute right-4 top-4 z-20 grid size-10 place-items-center rounded-full text-white/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-white/40"
       >
-        <X />
-      </Button>
+        <X className="size-5" />
+      </button>
 
       {/* Main stage: the focused image at real size (contained when larger). */}
       <div className="absolute inset-0 z-10 flex items-center justify-center p-16 pb-36">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.img
-            key={current.file}
-            src={imageUrl(current.wsId, current.file)}
-            alt=""
-            draggable={false}
-            initial={{ opacity: 0, scale: 0.97 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.97 }}
-            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-            className="max-h-full max-w-full rounded-lg object-contain shadow-2xl shadow-black/60"
-          />
-        </AnimatePresence>
+        <img
+          key={current.file}
+          src={imageUrl(current.wsId, current.file)}
+          alt=""
+          draggable={false}
+          className="max-h-full max-w-full rounded-lg object-contain shadow-2xl shadow-black/60"
+        />
       </div>
 
       {/* Prev / next arrows (hidden when there is nothing to page to). */}
@@ -133,7 +123,7 @@ export default function ImageViewerWindow() {
                 aria-label={`Show image ${i + 1} of ${state.images.length}`}
                 aria-current={i === index}
                 className={cn(
-                  "relative size-14 shrink-0 overflow-hidden rounded-lg border-2 transition-all",
+                  "relative size-14 shrink-0 overflow-hidden rounded-lg border-2",
                   i === index
                     ? "border-white/90"
                     : "border-transparent opacity-60 hover:opacity-100"
@@ -162,19 +152,18 @@ function ViewerArrow({
   onClick: () => void;
 }) {
   const Icon = side === "left" ? ChevronLeft : ChevronRight;
+  // Plain button again: no press animation, no size jump while clicking.
   return (
-    <Button
+    <button
       type="button"
-      size="icon"
-      variant="ghost"
       onClick={onClick}
       aria-label={side === "left" ? "Previous image" : "Next image"}
       className={cn(
-        "absolute top-1/2 z-20 size-12 -translate-y-1/2 rounded-full text-white/80 hover:bg-white/10 hover:text-white",
+        "absolute top-1/2 z-20 grid size-12 -translate-y-1/2 place-items-center rounded-full text-white/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-white/40",
         side === "left" ? "left-5" : "right-5"
       )}
     >
       <Icon className="size-7" />
-    </Button>
+    </button>
   );
 }

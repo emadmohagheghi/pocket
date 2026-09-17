@@ -8,13 +8,16 @@
  * then shows the already-existing viewer window.
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Window } from "@tauri-apps/api/window";
 
 import { api } from "@/lib/api";
 
 export const VIEWER_STATE_EVENT = "image-viewer://state";
+
+/** Tauri label of the pre-created, hidden viewer window. */
+const VIEWER_LABEL = "image-viewer";
 
 /** One image the viewer can page through. */
 export interface ViewerImage {
@@ -47,13 +50,13 @@ export async function openImageViewer(
     } satisfies ViewerState);
     // The viewer window exists from app startup (hidden); reveal it
     // maximized so it covers the screen like a fullscreen overlay.
-    const viewer = await Window.getByLabel("image-viewer");
-    if (viewer) {
-      await viewer.show();
-      await viewer.unminimize();
-      await viewer.maximize();
-      await viewer.setFocus();
-    }
+    // Raw plugin commands with an explicit label: `Window.getByLabel` is
+    // broken here — `get_all_windows` returns plain label strings in this
+    // Tauri version, so `getByLabel` never matches and returns null.
+    await invoke("plugin:window|show", { label: VIEWER_LABEL });
+    await invoke("plugin:window|unminimize", { label: VIEWER_LABEL });
+    await invoke("plugin:window|maximize", { label: VIEWER_LABEL });
+    await invoke("plugin:window|set_focus", { label: VIEWER_LABEL });
   } catch (error) {
     void api.log(`openImageViewer FAILED: ${error}`);
   }
