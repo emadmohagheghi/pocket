@@ -18,7 +18,7 @@ import { SettingsDialog } from "@/components/SettingsView";
 import { WorkspacesDialog } from "@/components/WorkspaceSwitcher";
 import { SearchBar } from "@/components/SearchBar";
 import { ImageDropOverlay } from "@/components/ImageDropOverlay";
-import { isImageFile, useImageStaging } from "@/hooks/useImageStaging";
+import { useImageStaging } from "@/hooks/useImageStaging";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -78,19 +78,14 @@ export default function MainWindow() {
   const dragDepth = useRef(0);
   const stageFiles = useCallback(
     (files: readonly File[]) => {
-      void staging
-        .addFiles(files)
-        .then(() => {
-          if (files.some(isImageFile)) {
-            toast.add({ title: "Image attached — add a note or save", type: "success" });
-          }
+      // No success toast: the staged thumbnails appearing in the capture bar
+      // are the feedback. Only failures surface as a toast.
+      void staging.addFiles(files).catch((error) =>
+        toast.add({
+          title: error instanceof Error ? error.message : "Could not attach image",
+          type: "error",
         })
-        .catch((error) =>
-          toast.add({
-            title: error instanceof Error ? error.message : "Could not attach image",
-            type: "error",
-          })
-        );
+      );
     },
     [staging]
   );
@@ -380,8 +375,6 @@ export default function MainWindow() {
         <div className="shrink-0 px-3 pb-3 pt-3">
           <AddBar staging={staging} />
         </div>
-        {/* Hidden file input for the capture bar's attach-images button. */}
-        {staging.fileInput}
       </div>
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

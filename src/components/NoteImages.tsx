@@ -10,6 +10,10 @@ export const MAX_SHOWN_IMAGES = 3;
  * Clickable image thumbnails for a note row. Shows up to three pictures;
  * the third darkens and carries a "+N" overlay when the note holds more,
  * and every click opens the fullscreen image viewer starting at that image.
+ *
+ * The strip never wraps — a note with many images would otherwise grow the
+ * row and break the feed's rhythm. It stays one line and scrolls sideways
+ * instead (hidden scrollbar; drag or wheel to pan).
  */
 export function NoteImages({
   wsId,
@@ -24,7 +28,7 @@ export function NoteImages({
 
   return (
     <div
-      className="mt-1.5 flex flex-wrap items-center gap-1.5"
+      className="-mx-1 mt-1.5 flex max-w-full items-center gap-1.5 overflow-x-auto px-1 py-0.5"
       data-tauri-drag-region="false"
     >
       {shown.map((image, index) => (
@@ -59,7 +63,7 @@ function NoteImageThumb({
     <button
       type="button"
       className={cn(
-        "group/thumb relative size-20 overflow-hidden rounded-xl border border-border/60 bg-muted/40 transition-colors hover:border-border focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        "group/thumb relative size-20 shrink-0 overflow-hidden rounded-xl border border-border/60 bg-muted/40 transition-colors hover:border-border focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
         hasOverlay && "cursor-pointer"
       )}
       aria-label={

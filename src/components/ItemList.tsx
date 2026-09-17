@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ImagePlus, Loader2, Mic, Pause, Play, Square, X } from "lucide-react";
+import { Loader2, Mic, Pause, Play, Square, X } from "lucide-react";
 
 import { usePocket } from "@/store";
 import { api } from "@/lib/api";
-import { formatDuration } from "@/lib/utils";
+import { openImageViewer } from "@/lib/imageViewer";
+import { cn, formatDuration } from "@/lib/utils";
 import { toast } from "@/components/ui/toast";
 import { useRecorder } from "@/hooks/useRecorder";
 import type { StagingApi } from "@/hooks/useImageStaging";
@@ -531,7 +532,7 @@ export function AddBar({ staging }: { staging: StagingApi }) {
       {staging.staged.length > 0 && (
         <StagedImageStrip
           images={staging.staged}
-          busy={staging.busy}
+          pending={staging.pendingCount}
           onRemove={(index) =>
             staging.setStaged((current) => current.filter((_, i) => i !== index))
           }
@@ -657,14 +658,6 @@ export function AddBar({ staging }: { staging: StagingApi }) {
           </label>
           <button
             type="button"
-            onClick={staging.pickFiles}
-            aria-label="Attach images"
-            className="mt-0 flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <ImagePlus className="size-4" />
-          </button>
-          <button
-            type="button"
             onClick={() => {
               void recorder.start();
             }}
@@ -689,52 +682,126 @@ export function AddBar({ staging }: { staging: StagingApi }) {
   );
 }
 
-/** Thumbnails of staged (not yet saved) images above the capture textarea. */
+/** Thumbs shown in the staging strip before the "+N" overlay kicks in. */
+const MAX_SHOWN_STAGED = 5;
+
+/**
+ * Thumbnails of staged (not yet saved) images above the capture textarea.
+ * Up to five thumbs, a dark "+N" overlay on the fifth, and clicking any
+ * thumb opens the fullscreen viewer over all staged images. `pending`
+ * images are still uploading — one dashed spinner tile each, so a big
+ * paste shows exactly how many pictures are in flight.
+ */
 function StagedImageStrip({
   images,
-  busy,
+  pending,
   onRemove,
 }: {
   images: ItemImage[];
-  busy: boolean;
+  pending: number;
   onRemove: (index: number) => void;
 }) {
   const activeWorkspaceId =
     usePocket((s) => s.settings?.activeWorkspaceId) ?? "";
+  const shown = images.slice(0, MAX_SHOWN_STAGED);
+  const extra = images.length - shown.length;
+  const openViewer = (index: number) => {
+    void openImageViewer(
+      images.map((img) => ({ wsId: activeWorkspaceId, file: img.file })),
+      index
+    ).catch(() => {
+      /* viewer unavailable — ignore */
+    });
+  };
   return (
     <div
-      className="mb-1.5 flex flex-wrap items-center gap-1.5"
+      className="-mx-1 mb-1.5 flex max-w-full items-center gap-1.5 overflow-x-auto px-1 py-0.5"
       data-tauri-drag-region="false"
     >
-      {images.map((image, index) => (
-        <div
+      {shown.map((image, index) => (
+        <StagedThumb
           key={image.id}
-          className="group/staged relative size-16 overflow-hidden rounded-xl border border-border/60 bg-muted/40"
-        >
-          <img
-            src={imageUrl(activeWorkspaceId, image.file)}
-            alt=""
-            draggable={false}
-            className="size-full object-cover"
-          />
-          <button
-            type="button"
-            onClick={() => onRemove(index)}
-            aria-label="Remove image"
-            className="absolute right-0.5 top-0.5 grid size-5 place-items-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover/staged:opacity-100 focus-visible:opacity-100"
-          >
-            <X className="size-3" />
-          </button>
-        </div>
+          image={image}
+          wsId={activeWorkspaceId}
+          overflow={index === MAX_SHOWN_STAGED - 1 ? extra : 0}
+          onRemove={() => onRemove(images.indexOf(image))}
+          onOpen={() => openViewer(images.indexOf(image))}
+        />
       ))}
-      {busy && (
+      {Array.from({ length: pending }, (_, i) => (
         <div
-          className="grid size-16 place-items-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground"
+          key={`pending-${i}`}
+          className="grid size-16 shrink-0 animate-pulse place-items-center rounded-xl border border-dashed border-border/60 bg-muted/40 text-muted-foreground"
           aria-label="Attaching image"
         >
           <Loader2 className="size-4 animate-spin" />
         </div>
-      )}
+      ))}
     </div>
   );
+}
+
+function StagedThumb({
+  image,
+  wsId,
+  overflow,
+  onRemove,
+  onOpen,
+}: {
+  image: ItemImage;
+  wsId: string;
+  overflow: number;
+  onRemove: () => void;
+  onOpen: () => void;
+}) {
+  const [landed, setLanded] = useState(false);
+  const hasOverlay = overflow > 0;
+  return (
+    <div
+      className={cn(
+        "group/staged relative size-16 shrink-0 overflow-hidden rounded-xl border bg-muted/40 transition-colors duration-500",
+        landed ? "border-border/60" : "border-primary/60"
+      )}
+    >
+      <img
+        src={imageUrl(wsId, image.file)}
+        alt=""
+        draggable={false}
+        onLoad={() => setLanded(true)}
+        className="size-full object-cover"
+      />
+      {/* Viewer opener: the whole tile clicks through to the fullscreen
+          viewer; the tiny remove button stops propagation on top of it. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={
+          hasOverlay
+            ? `Show ${overflow + MAX_SHOWN_STAGED} attached images`
+            : "Show attached image"
+        }
+        className="absolute inset-0 size-full cursor-pointer"
+        tabIndex={-1}
+      />
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        aria-label="Remove image"
+        className="absolute right-0.5 top-0.5 z-10 grid size-5 place-items-center rounded-full bg-black/60 text-white opacity-0 transition-opacity group-hover/staged:opacity-100 focus-visible:opacity-100"
+      >
+        <X className="size-3" />
+      </button>
+      {hasOverlay && (
+        <span
+          className="pointer-events-none absolute inset-0 grid place-items-center bg-black/45 text-sm font-medium text-white"
+          aria-hidden
+        >
+          +{overflow}
+        </span>
+      )}
+    </div>
+  )
 }

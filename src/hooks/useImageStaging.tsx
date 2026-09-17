@@ -2,12 +2,13 @@ import { useCallback, useRef, useState } from "react";
 
 import { api, extFromMimeType } from "@/lib/api";
 import { usePocket } from "@/store";
-import { toast } from "@/components/ui/toast";
 import type { ItemImage } from "@/types";
 
 /**
  * Uploads are unlimited — the display cap lives in NoteImages (three thumbs +
- * a dark "+N" overflow badge on the third).
+ * a dark "+N" overflow badge on the third). While files upload, `pendingCount`
+ * tells the strip how many spinner placeholders to show, so pasting a batch
+ * gives per-image feedback instead of a single silent spinner.
  */
 
 /** Detect an image File by MIME type or extension fallback. */
@@ -18,7 +19,7 @@ export function isImageFile(file: File): boolean {
 
 /**
  * Public surface of `useImageStaging` (staging state lives in MainWindow and
- * is shared down to AddBar).
+ * is shared down to AddBar). Images get in via drag & drop and Ctrl+V only.
  */
 export interface StagingApi {
   staged: ItemImage[];
@@ -26,10 +27,8 @@ export interface StagingApi {
   addFiles: (files: readonly File[]) => Promise<void>;
   reset: () => void;
   busy: boolean;
-  /** Open the OS file picker; picked images are staged automatically. */
-  pickFiles: () => void;
-  /** Hidden file input backing `pickFiles` — render it once, anywhere. */
-  fileInput: React.ReactNode;
+  /** Images still uploading — the strip renders one spinner tile each. */
+  pendingCount: number;
 }
 
 /**
@@ -39,9 +38,8 @@ export interface StagingApi {
  */
 export function useImageStaging(): StagingApi {
   const [staged, setStaged] = useState<ItemImage[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
   const requestId = useRef(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = useCallback(
     async (files: readonly File[]) => {
@@ -51,7 +49,7 @@ export function useImageStaging(): StagingApi {
       if (!wsId) return;
 
       const ticket = ++requestId.current;
-      setBusy(true);
+      setPendingCount(images.length);
       try {
         const saved: ItemImage[] = [];
         for (const file of images) {
@@ -59,14 +57,15 @@ export function useImageStaging(): StagingApi {
           const ext = extFromMimeType(file.type);
           const image = await api.saveImage(wsId, ext, bytes);
           saved.push(image);
+          if (ticket === requestId.current) setPendingCount(images.length - saved.length);
         }
         if (ticket !== requestId.current) return; // superseded by a reset()
+        setPendingCount(0);
         setStaged((current) => [...current, ...saved]);
       } catch (error) {
+        if (ticket === requestId.current) setPendingCount(0);
         void api.log(`useImageStaging addFiles FAILED: ${error}`);
         throw error;
-      } finally {
-        if (ticket === requestId.current) setBusy(false);
       }
     },
     []
@@ -75,29 +74,15 @@ export function useImageStaging(): StagingApi {
   const reset = useCallback(() => {
     requestId.current += 1;
     setStaged([]);
-    setBusy(false);
+    setPendingCount(0);
   }, []);
 
-  const pickFiles = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const fileInput = (
-    <input
-      ref={fileInputRef}
-      type="file"
-      accept="image/*"
-      multiple
-      hidden
-      onChange={(event) => {
-        const files = Array.from(event.target.files ?? []);
-        void addFiles(files).catch(() =>
-          toast.add({ title: "Could not attach image", type: "error" })
-        );
-        event.target.value = "";
-      }}
-    />
-  );
-
-  return { staged, setStaged, addFiles, reset, busy, pickFiles, fileInput };
+  return {
+    staged,
+    setStaged,
+    addFiles,
+    reset,
+    busy: pendingCount > 0,
+    pendingCount,
+  };
 }
