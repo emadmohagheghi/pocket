@@ -20,6 +20,25 @@ function errMessage(e: unknown): string {
 }
 
 /**
+ * The backend omits empty/absent optional fields from its JSON (images are
+ * skipped when empty, recording when None), so older notes arrive with
+ * `images`/`recording` as `undefined` instead of the empty defaults the
+ * frontend types promise. Left as-is, every existing note crashes the React
+ * tree in NoteImages — the window then stays a blank transparent card.
+ */
+function normalizeItem(raw: Item): Item {
+  return {
+    ...raw,
+    images: Array.isArray(raw.images) ? raw.images : [],
+    recording: raw.recording ?? null,
+  };
+}
+
+function normalizeWorkspaceData(raw: WorkspaceData): WorkspaceData {
+  return { items: raw.items.map(normalizeItem), recordings: raw.recordings };
+}
+
+/**
  * One reversible primitive. `restore*` steps upsert the full entity back
  * (original id and timestamps preserved); `remove*` steps delete it again.
  * A user-visible action (delete, merge, move, …) is a list of these.
@@ -145,7 +164,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             "items-changed",
             (e) => {
               if (e.payload.workspaceId === get().settings?.activeWorkspaceId) {
-                set({ data: e.payload.data });
+                set({ data: normalizeWorkspaceData(e.payload.data) });
               }
             }
           ),
@@ -189,7 +208,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
     if (!wsId) return;
     try {
       const data = await api.getItems(wsId);
-      set({ data });
+      set({ data: normalizeWorkspaceData(data) });
     } catch (e) {
       void api.log(`refreshItems FAILED: ${errMessage(e)}`);
     }
