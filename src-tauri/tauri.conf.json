@@ -24,7 +24,24 @@
         "shadow": false,
         "maximizable": false,
         "center": true,
-        "visible": false
+        "visible": false,
+        "dragDropEnabled": false
+      },
+      {
+        "label": "image-viewer",
+        "title": "Pocket Image Viewer",
+        "width": 900,
+        "height": 700,
+        "minWidth": 480,
+        "minHeight": 360,
+        "resizable": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "center": true,
+        "visible": false,
+        "dragDropEnabled": false
       },
       {
         "label": "quick-capture",
@@ -58,7 +75,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost https://api.github.com; img-src 'self' data:; media-src 'self' data: http://voice.localhost https://voice.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost https://api.github.com; img-src 'self' data: blob: http://image.localhost https://image.localhost; media-src 'self' data: http://voice.localhost https://voice.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     }
   },
   "bundle": {

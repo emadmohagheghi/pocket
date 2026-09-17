@@ -44,6 +44,7 @@ pub fn run() {
             None,
         ))
         .register_uri_scheme_protocol("voice", voice_protocol)
+        .register_uri_scheme_protocol("image", image_protocol)
         .manage(AppFlags {
             gaming: std::sync::atomic::AtomicBool::new(false),
             frontend_ready: std::sync::atomic::AtomicBool::new(false),
@@ -102,8 +103,12 @@ pub fn run() {
                     // the tray. Explicit Quit actions terminate the app.
                     api.prevent_close();
                     let _ = window.hide();
-                } else if window.label() == "quick-capture" || window.label() == "hud" {
-                    // The capture window and the HUD always hide instead of quitting.
+                } else if window.label() == "quick-capture"
+                    || window.label() == "hud"
+                    || window.label() == "image-viewer"
+                {
+                    // The capture window, the HUD and the image viewer always hide
+                    // instead of quitting.
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -126,10 +131,12 @@ pub fn run() {
             commands::create_item,
             commands::update_item,
             commands::delete_item,
+            commands::move_item,
             commands::delete_entries_bulk,
             commands::set_pinned,
             commands::search,
             commands::save_recording,
+            commands::save_image,
             commands::rename_recording,
             commands::delete_recording,
             commands::copy_to_clipboard,
@@ -298,6 +305,75 @@ fn grant_microphone_permission(window: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn grant_microphone_permission(_window: &tauri::WebviewWindow) {}
+
+/// Serves note images from `data_dir/images/<workspace>/<file>` over the
+/// `image://` scheme (the voice:// equivalent for attached pictures). Only
+/// strict, internally-generated paths with known image extensions are
+/// accepted; any file inside the images directory is served, because freshly
+/// staged images are legitimately requested *before* they are attached to a
+/// note and appear in metadata. Path traversal is impossible by construction
+/// (`valid_file_name` rejects separators, `valid_id` rejects odd workspaces).
+fn image_protocol<R: Runtime>(
+    ctx: UriSchemeContext<'_, R>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Cow<'static, [u8]>> {
+    let not_found = |msg: &'static str| {
+        tauri::http::Response::builder()
+            .status(404)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Cow::Borrowed(msg.as_bytes()))
+            .unwrap()
+    };
+
+    let path = request.uri().path().trim_start_matches('/');
+    let mut parts = path.split('/');
+    let (Some(ws_id), Some(file), None) = (parts.next(), parts.next(), parts.next()) else {
+        return not_found("not found");
+    };
+    if !fsutil::valid_id(ws_id) || !fsutil::valid_file_name(file) || !has_image_ext(file) {
+        return not_found("not found");
+    }
+
+    let store = match ctx.app_handle().try_state::<Mutex<Store>>() {
+        Some(s) => s,
+        None => return not_found("not ready"),
+    };
+    let store = store.lock().unwrap();
+    let full_path = store.image_path(ws_id, file);
+    drop(store);
+
+    let content_type = match file.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
+    };
+
+    match std::fs::read(&full_path) {
+        Ok(bytes) => {
+            let len = bytes.len();
+            tauri::http::Response::builder()
+                .status(200)
+                .header(CONTENT_TYPE, content_type)
+                .header(CONTENT_LENGTH, len.to_string())
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(CACHE_CONTROL, "no-store")
+                .body(Cow::Owned(bytes))
+                .unwrap()
+        }
+        Err(_) => not_found("not found"),
+    }
+}
+
+fn has_image_ext(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
 
 /// Serves voice recordings from `data_dir/voices/<workspace>/<file>.webm`
 /// over the `voice://` scheme. Only strict, internally-generated paths are
