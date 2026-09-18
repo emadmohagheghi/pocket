@@ -36,7 +36,7 @@ export function isViewerWindow(): boolean {
   return getCurrentWebviewWindow().label === "image-viewer";
 }
 
-/** Open the fullscreen viewer window showing `images`, starting at `index`. */
+/** Open the viewer window showing `images`, starting at `index`. */
 export async function openImageViewer(
   images: ViewerImage[],
   index: number
@@ -48,14 +48,13 @@ export async function openImageViewer(
       images,
       index: clamped,
     } satisfies ViewerState);
-    // The viewer window exists from app startup (hidden); reveal it
-    // maximized so it covers the screen like a fullscreen overlay.
-    // Raw plugin commands with an explicit label: `Window.getByLabel` is
-    // broken here — `get_all_windows` returns plain label strings in this
-    // Tauri version, so `getByLabel` never matches and returns null.
+    // The viewer window exists from app startup (hidden); reveal it as a
+    // normal window — never maximized/fullscreen, per design. Raw plugin
+    // commands with an explicit label: `Window.getByLabel` is broken here —
+    // `get_all_windows` returns plain label strings in this Tauri version,
+    // so `getByLabel` never matches and returns null.
     await invoke("plugin:window|show", { label: VIEWER_LABEL });
     await invoke("plugin:window|unminimize", { label: VIEWER_LABEL });
-    await invoke("plugin:window|maximize", { label: VIEWER_LABEL });
     await invoke("plugin:window|set_focus", { label: VIEWER_LABEL });
   } catch (error) {
     void api.log(`openImageViewer FAILED: ${error}`);

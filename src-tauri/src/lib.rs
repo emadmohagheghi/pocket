@@ -404,11 +404,15 @@ fn voice_protocol<R: Runtime>(
         None => return not_found("not ready"),
     };
     let store = store.lock().unwrap();
-    // Defense in depth: the recording must exist in workspace metadata.
-    let known = store
-        .workspace_data(ws_id)
-        .map(|d| d.recordings.iter().any(|r| r.file == file))
-        .unwrap_or(false);
+    // Defense in depth: the recording must exist in workspace metadata —
+    // either standalone in the feed or embedded in a note (image+voice
+    // notes carry their recording on the item, not in the feed).
+    let known = store.workspace_data(ws_id).map_or(false, |d| {
+        d.recordings.iter().any(|r| r.file == file)
+            || d.items
+                .iter()
+                .any(|i| i.recording.as_ref().is_some_and(|r| r.file == file))
+    });
     if !known {
         return not_found("not found");
     }

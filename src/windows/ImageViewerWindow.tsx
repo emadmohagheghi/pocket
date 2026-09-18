@@ -7,28 +7,28 @@ import { listenViewerState, type ViewerState } from "@/lib/imageViewer";
 import { cn } from "@/lib/utils";
 
 /**
- * Fullscreen image viewer (runs inside the dedicated `image-viewer` window).
+ * Image viewer (runs inside the dedicated `image-viewer` window).
  *
- * - Dark translucent backdrop over the desktop (the window itself is
- *   transparent; the dimming layer is drawn by this component).
+ * - A normal (non-fullscreen) window: dark canvas filling the window only.
  * - The focused image renders at its real pixel size (CSS px) — never
  *   upscaled; a too-big image is contained instead.
  * - Left/right arrows page images; a thumbnail slider at the bottom shows
  *   all images and jumps on click.
+ * - It only closes via the X button — neither Escape nor a stray click on
+ *   the canvas dismisses it.
  *
- * Deliberately animation-free — no mount fade, no page cross-fade, no
- * backdrop fade: the next image simply replaces the previous one. On a
- * fullscreen window every one of those transitions read as lag.
+ * Deliberately animation-free — no mount fade, no page cross-fade: the next
+ * image simply replaces the previous one. Those transitions read as lag.
  */
 export default function ImageViewerWindow() {
   const [state, setState] = useState<ViewerState | null>(null);
   const index = state ? Math.min(state.index, state.images.length - 1) : 0;
 
-  // Hide the actual window (not just the overlay): a transparent, visible
-  // window would keep intercepting desktop clicks. The backend also hides
-  // the window on a native close request — same convention as the HUD.
+  // Close = actually close the window. The backend intercepts the close
+  // request and hides instead (same convention as the HUD), so the window
+  // stays alive for the next open.
   const close = useCallback(() => {
-    void getCurrentWebviewWindow().hide();
+    void getCurrentWebviewWindow().close();
   }, []);
 
   const step = useCallback(
@@ -52,16 +52,16 @@ export default function ImageViewerWindow() {
     };
   }, []);
 
-  // Keyboard: arrows to page, Escape to close.
+  // Keyboard: arrows to page. Escape intentionally does NOT close — only
+  // the X button does.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "ArrowLeft") step(-1);
       else if (event.key === "ArrowRight") step(1);
-      else if (event.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, close]);
+  }, [step]);
 
   if (!state || state.images.length === 0) {
     return <div className="h-screen w-screen bg-transparent" />;
@@ -71,12 +71,9 @@ export default function ImageViewerWindow() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
-      {/* Dim, blurred backdrop over the desktop. Clicks on it close. */}
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={close}
-        aria-hidden
-      />
+      {/* Dimmed canvas: window background only — clicking it does nothing;
+          the viewer closes exclusively via the X button. */}
+      <div className="absolute inset-0 bg-neutral-950" aria-hidden />
 
       {/* Close button. Plain button: the shared Button variant animates on
           press (translate-y), which reads as the control sinking away. */}
