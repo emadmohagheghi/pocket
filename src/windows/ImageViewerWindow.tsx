@@ -7,14 +7,15 @@ import { listenViewerState, type ViewerState } from "@/lib/imageViewer";
 import { cn } from "@/lib/utils";
 
 /**
- * Image viewer (runs inside the dedicated `image-viewer` window).
+ * Fullscreen image viewer (runs inside the dedicated `image-viewer` window).
  *
- * - A normal (non-fullscreen) window: dark canvas filling the window only.
+ * - Always fullscreen: the window opens maximized and covers the screen;
+ *   a dark canvas fills it. It never leaves fullscreen on its own.
  * - The focused image renders at its real pixel size (CSS px) — never
  *   upscaled; a too-big image is contained instead.
  * - Left/right arrows page images; a thumbnail slider at the bottom shows
  *   all images and jumps on click.
- * - It only closes via the X button — neither Escape nor a stray click on
+ * - It closes exclusively via the X button — neither Escape nor a click on
  *   the canvas dismisses it.
  *
  * Deliberately animation-free — no mount fade, no page cross-fade: the next
@@ -71,8 +72,8 @@ export default function ImageViewerWindow() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
-      {/* Dimmed canvas: window background only — clicking it does nothing;
-          the viewer closes exclusively via the X button. */}
+      {/* Fullscreen dark canvas. Clicking it does nothing; the viewer
+          closes exclusively via the X button. */}
       <div className="absolute inset-0 bg-neutral-950" aria-hidden />
 
       {/* Close button. Plain button: the shared Button variant animates on
