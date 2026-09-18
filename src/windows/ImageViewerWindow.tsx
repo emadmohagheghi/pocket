@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { imageUrl } from "@/lib/api";
@@ -9,8 +10,8 @@ import { cn } from "@/lib/utils";
 /**
  * Fullscreen image viewer (runs inside the dedicated `image-viewer` window).
  *
- * - Always fullscreen: the window opens maximized and covers the screen;
- *   a dark canvas fills it. It never leaves fullscreen on its own.
+ * - Always fullscreen: the window opens in native fullscreen and covers
+ *   everything, the taskbar included. It never leaves fullscreen alone.
  * - The focused image renders at its real pixel size (CSS px) — never
  *   upscaled; a too-big image is contained instead.
  * - Left/right arrows page images; a thumbnail slider at the bottom shows
@@ -54,14 +55,16 @@ export default function ImageViewerWindow() {
   }, []);
 
   // The viewer must stay fullscreen under all circumstances: if anything
-  // ever restores/unmaximizes it (OS shortcut, stray command), snap back.
+  // ever removes fullscreen (OS shortcut, stray command), re-enter it.
   useEffect(() => {
     const win = getCurrentWebviewWindow();
     const unlisten = win.onResized(async () => {
       try {
-        if (await win.isMaximized()) return;
         if (!(await win.isVisible())) return;
-        await win.maximize();
+        await invoke("plugin:window|set_fullscreen", {
+          label: "image-viewer",
+          value: true,
+        });
       } catch {
         /* window gone: nothing to enforce */
       }
@@ -90,9 +93,9 @@ export default function ImageViewerWindow() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden">
-      {/* Fullscreen dark canvas. Clicking it does nothing; the viewer
-          closes exclusively via the X button. */}
-      <div className="absolute inset-0 bg-neutral-950" aria-hidden />
+      {/* Translucent dark canvas over the desktop. Clicking it does
+          nothing; the viewer closes exclusively via the X button. */}
+      <div className="absolute inset-0 bg-black/60" aria-hidden />
 
       {/* Close button. Plain button: the shared Button variant animates on
           press (translate-y), which reads as the control sinking away. */}

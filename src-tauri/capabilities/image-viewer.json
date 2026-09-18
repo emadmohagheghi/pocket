@@ -10,6 +10,7 @@
     "core:window:allow-is-visible",
     "core:window:allow-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-set-fullscreen",
     "core:event:allow-listen"
   ]
 }
