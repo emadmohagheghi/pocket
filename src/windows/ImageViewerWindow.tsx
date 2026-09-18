@@ -53,6 +53,24 @@ export default function ImageViewerWindow() {
     };
   }, []);
 
+  // The viewer must stay fullscreen under all circumstances: if anything
+  // ever restores/unmaximizes it (OS shortcut, stray command), snap back.
+  useEffect(() => {
+    const win = getCurrentWebviewWindow();
+    const unlisten = win.onResized(async () => {
+      try {
+        if (await win.isMaximized()) return;
+        if (!(await win.isVisible())) return;
+        await win.maximize();
+      } catch {
+        /* window gone: nothing to enforce */
+      }
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // Keyboard: arrows to page. Escape intentionally does NOT close — only
   // the X button does.
   useEffect(() => {
