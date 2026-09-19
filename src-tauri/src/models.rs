@@ -98,6 +98,14 @@ pub struct Settings {
     pub always_on_top: bool,
     pub theme: String,
     pub note_preview_lines: u8,
+    /// App version running the previous launch ("0.2.4"). Absent until the
+    /// first recorded launch; tracked so a "what's new" note can be shown
+    /// exactly once to users who update in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_launch_version: Option<String>,
+    /// Version whose "what's new" modal the user has dismissed (or seen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whats_new_seen_version: Option<String>,
 }
 
 impl Default for Settings {
@@ -110,6 +118,8 @@ impl Default for Settings {
             always_on_top: false,
             theme: "system".into(),
             note_preview_lines: 5,
+            last_launch_version: None,
+            whats_new_seen_version: None,
         }
     }
 }
@@ -123,6 +133,10 @@ pub struct SettingsPatch {
     pub always_on_top: Option<bool>,
     pub theme: Option<String>,
     pub note_preview_lines: Option<u8>,
+    /// Records that the user has dismissed this version's "what's new"
+    /// modal. Handled only through `mark_whats_new_seen`.
+    #[serde(skip_deserializing)]
+    pub whats_new_seen_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,6 +221,8 @@ pub struct InitialState {
     pub settings: Settings,
     pub workspaces: Vec<WorkspaceInfo>,
     pub storage: StorageInfo,
+    /// Version whose "what's new" modal should show exactly once, if any.
+    pub show_whats_new_for: Option<String>,
 }
 
 #[cfg(test)]
@@ -227,6 +243,7 @@ mod tests {
     fn old_settings_files_gain_the_note_preview_default() {
         let settings: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(settings.note_preview_lines, 5);
+        assert_eq!(settings.last_launch_version, None);
     }
 
     #[test]

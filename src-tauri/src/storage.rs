@@ -85,6 +85,10 @@ pub struct Store {
     pub settings: Settings,
     pub workspaces: Vec<WorkspaceMeta>,
     pub data: HashMap<String, WorkspaceData>,
+    /// Version whose "what's new" note this launch should show, if any.
+    /// Decided once at load; fresh installs never set it. Transient (never
+    /// serialized anywhere).
+    pub whats_new_pending_version: Option<String>,
 }
 
 impl Store {
@@ -148,6 +152,36 @@ impl Store {
         // cannot suggest that the detector is active.
         let gaming_was_enabled = settings.gaming_detection_enabled;
         settings.gaming_detection_enabled = false;
+
+        // Version tracking for the one-shot "what's new" note:
+        // - Fresh install (no settings file): pre-seed the version so new
+        //   users NEVER see the modal.
+        // - Updating user (a recorded launch version different from the
+        //   running one, or a settings file predating version tracking):
+        //   this exact launch shows the note once, and the marker is
+        //   persisted immediately so a crash can never re-show it later.
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let is_update_launch = match &settings.last_launch_version {
+            None => {
+                let fresh_install = !data_dir.join("settings.json").exists();
+                if fresh_install {
+                    settings.last_launch_version = Some(current_version.clone());
+                    false
+                } else {
+                    true // pre-tracking install: an updating user
+                }
+            }
+            Some(prev) => prev != &current_version,
+        };
+        let whats_new_pending_version =
+            is_update_launch.then(|| current_version.clone());
+        if is_update_launch {
+            // "Exactly once" is decided at load: the modal's version is
+            // marked seen right here, before the frontend ever asks for
+            // state. The in-memory pending value only lives for this launch.
+            settings.whats_new_seen_version = Some(current_version.clone());
+        }
+        settings.last_launch_version = Some(current_version);
 
         let workspaces: Vec<WorkspaceMeta> =
             match fsutil::read_json(&data_dir.join("workspaces.json")) {
@@ -219,6 +253,7 @@ impl Store {
             settings,
             workspaces,
             data,
+            whats_new_pending_version,
         };
         if gaming_was_enabled {
             store.persist_settings();
@@ -247,6 +282,9 @@ impl Store {
             store.settings.active_workspace_id = store.workspaces[0].id.clone();
             store.persist_settings();
         }
+        // The launch-version stamps above must survive crashes before any
+        // later settings write, so persist once per load.
+        store.persist_settings();
         store
     }
 
@@ -1615,6 +1653,76 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
         let store = Store::load(dir.clone(), false);
         (store, dir)
+    }
+
+    #[test]
+    fn fresh_install_never_sees_whats_new() {
+        let (store, dir) = test_store();
+        assert_eq!(store.whats_new_pending_version, None);
+        assert_eq!(
+            store.settings.last_launch_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn pre_tracking_install_gets_the_whats_new_note_once() {
+        // A settings file without version markers = installed before
+        // version tracking existed (a 0.2.4 user updating in place).
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"launchOnStartup":false,"startMinimized":false,"activeWorkspaceId":"","gamingDetectionEnabled":false,"alwaysOnTop":false,"theme":"system","notePreviewLines":5}"#,
+        )
+        .unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(
+            store.whats_new_pending_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        // The one-shot marker is persisted at load, so a crash can never
+        // re-show the note.
+        assert_eq!(
+            store.settings.whats_new_seen_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let reloaded = Store::load(dir.clone(), false);
+        assert_eq!(reloaded.whats_new_pending_version, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn same_version_relaunch_does_not_re_show_whats_new() {
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = format!(
+            r#"{{"lastLaunchVersion":"{}","whatsNewSeenVersion":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(dir.join("settings.json"), settings).unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(store.whats_new_pending_version, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn version_bump_shows_whats_new_again_for_the_new_version() {
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"lastLaunchVersion":"0.2.4","whatsNewSeenVersion":"0.2.4"}"#,
+        )
+        .unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(
+            store.whats_new_pending_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        cleanup(&dir);
     }
 
     fn cleanup(dir: &PathBuf) {

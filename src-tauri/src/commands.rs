@@ -71,14 +71,21 @@ pub fn show_main_window(app: &AppHandle) {
 /// The frontend normally reveals a standard launch as soon as its persisted
 /// state is ready. Fail open if that IPC handshake never arrives so a broken or
 /// unusually slow webview cannot leave Pocket permanently inaccessible in the
-/// system tray.
-pub fn schedule_startup_reveal(app: AppHandle, start_minimized: bool) {
-    if start_minimized {
+/// system tray. A post-update relaunch (`post_update_launch`) must always
+/// surface, so its fail-safe fires unconditionally and gives the webview a
+/// longer grace period before forcing the window visible.
+pub fn schedule_startup_reveal(app: AppHandle, start_minimized: bool, post_update_launch: bool) {
+    if start_minimized && !post_update_launch {
         return;
     }
 
+    let grace = if post_update_launch {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(3)
+    };
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(grace);
         if app
             .state::<AppFlags>()
             .frontend_ready
@@ -88,7 +95,11 @@ pub fn schedule_startup_reveal(app: AppHandle, start_minimized: bool) {
         }
 
         let reveal_app = app.clone();
-        let _ = app.run_on_main_thread(move || show_main_window_now(&reveal_app));
+        let _ = app.run_on_main_thread(move || {
+            eprintln!("[pocket] startup reveal fail-safe fired (post_update={post_update_launch})");
+            // Shows + unminimizes + focuses.
+            show_main_window_now(&reveal_app);
+        });
     });
 }
 
@@ -108,7 +119,12 @@ pub fn frontend_ready(app: AppHandle) -> AppResult<()> {
         start_minimized
     };
 
-    if show_was_requested || !start_minimized {
+    // A relaunch straight after a self-update always shows the window: the
+    // user asked for the update, so opening into the tray looks broken.
+    let post_update_launch = std::env::args()
+        .any(|arg| arg == crate::updater::POST_UPDATE_LAUNCH_MARKER);
+
+    if show_was_requested || !start_minimized || post_update_launch {
         show_main_window_now(&app);
     }
     Ok(())
@@ -122,6 +138,7 @@ pub fn get_state(app: AppHandle) -> AppResult<InitialState> {
         settings: store.settings.clone(),
         workspaces: store.all_workspace_infos(),
         storage: storage_info(&store),
+        show_whats_new_for: store.whats_new_pending_version.clone(),
     })
 }
 
@@ -799,6 +816,25 @@ pub fn update_settings(app: AppHandle, patch: SettingsPatch) -> AppResult<Settin
     }
     state_changed(&app);
     Ok(settings)
+}
+
+/// Persist that the user has seen/dismissed this version's "what's new"
+/// modal, so it never shows again. Idempotent.
+#[tauri::command]
+pub fn mark_whats_new_seen(app: AppHandle, version: String) -> AppResult<()> {
+    if version.trim().is_empty() {
+        return Err(AppError::Invalid("version cannot be empty".into()));
+    }
+    {
+        let store = app.state::<Mutex<Store>>();
+        let mut guard = store.lock().unwrap();
+        if guard.settings.whats_new_seen_version.as_deref() != Some(version.as_str()) {
+            guard.settings.whats_new_seen_version = Some(version);
+            guard.persist_settings();
+        }
+    }
+    state_changed(&app);
+    Ok(())
 }
 
 /// Sync the main window's always-on-top state with the persisted setting.

@@ -19,6 +19,8 @@ import type {
 export const api = {
   getState: () => invoke<InitialState>("get_state"),
   frontendReady: () => invoke<void>("frontend_ready"),
+  markWhatsNewSeen: (version: string) =>
+    invoke<void>("mark_whats_new_seen", { version }),
   getItems: (workspaceId: string) =>
     invoke<WorkspaceData>("get_items", { workspaceId }),
 

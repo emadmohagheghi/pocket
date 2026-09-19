@@ -61,6 +61,10 @@ export interface Settings {
   theme: "system" | "light" | "dark";
   /** 0 shows the full note; 1–6 sets the collapsed preview height. */
   notePreviewLines: number;
+  /** App version running the previous launch; null on first-recorded launch. */
+  lastLaunchVersion: string | null;
+  /** Version whose "what's new" modal was dismissed; null until then. */
+  whatsNewSeenVersion: string | null;
 }
 
 export interface StorageInfo {
@@ -97,6 +101,8 @@ export interface InitialState {
   settings: Settings;
   workspaces: WorkspaceInfo[];
   storage: StorageInfo;
+  /** Version whose "what's new" modal should show once, if any. */
+  showWhatsNewFor: string | null;
 }
 
 export interface SearchHit {

@@ -24,12 +24,20 @@ use storage::Store;
 
 pub fn run() {
     install_panic_logger();
+    // A relaunch carrying the post-update marker comes from the self-update
+    // installer/watcher: its window must ALWAYS end up visible (the user just
+    // clicked "update"), even with start-minimized enabled.
+    let post_update_launch = std::env::args()
+        .any(|arg| arg == updater::POST_UPDATE_LAUNCH_MARKER);
     // Load the store BEFORE the builder starts creating windows: config
     // windows are built before setup() runs, and a fast webview (warm dev
     // server or cached assets) can invoke commands before setup finishes —
     // which used to panic with "state() called before manage()".
     let (data_dir, fallback) = resolve_data_dir();
-    eprintln!("[pocket] data directory: {}", data_dir.display());
+    eprintln!(
+        "[pocket] data directory: {} (post_update_launch={post_update_launch})",
+        data_dir.display()
+    );
     let store = Store::load(data_dir, fallback);
     let start_minimized = store.settings.start_minimized;
     let app = tauri::Builder::default()
@@ -60,8 +68,10 @@ pub fn run() {
 
             // The frontend normally reveals the initialized window. Keep a
             // backend fail-safe so a missed ready event cannot strand a normal
-            // launch in the tray forever.
-            commands::schedule_startup_reveal(handle.clone(), start_minimized);
+            // launch in the tray forever. A post-update relaunch always gets
+            // the fail-safe so the freshly updated Pocket can never open as a
+            // tray-only ghost.
+            commands::schedule_startup_reveal(handle.clone(), start_minimized, post_update_launch);
 
             // Keep OS autostart in sync with the persisted preference.
             commands::apply_autostart(&handle);
@@ -141,6 +151,7 @@ pub fn run() {
             commands::delete_recording,
             commands::copy_to_clipboard,
             commands::update_settings,
+            commands::mark_whats_new_seen,
             commands::get_gaming_state,
             commands::open_voice_capture,
             commands::open_url,

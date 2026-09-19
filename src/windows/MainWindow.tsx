@@ -18,6 +18,7 @@ import { SettingsDialog } from "@/components/SettingsView";
 import { WorkspacesDialog } from "@/components/WorkspaceSwitcher";
 import { SearchBar } from "@/components/SearchBar";
 import { ImageDropOverlay } from "@/components/ImageDropOverlay";
+import { WhatsNewModal } from "@/components/WhatsNewModal";
 import { useImageStaging } from "@/hooks/useImageStaging";
 import { Button } from "@/components/ui/button";
 import {
@@ -60,6 +61,8 @@ export default function MainWindow() {
   const init = usePocket((s) => s.init);
   const settings = usePocket((s) => s.settings);
   const gaming = usePocket((s) => s.gaming);
+  // One-shot "what's new" after an in-place update; null hides the modal.
+  const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
   const setSettings = usePocket((s) => s.setSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
@@ -146,9 +149,24 @@ export default function MainWindow() {
 
   useEffect(() => {
     void init()
-      .then(() => api.frontendReady())
+      .then(() => {
+        api.frontendReady().catch(() => {});
+        // The store seeds its state inside init(); read the pending "what's
+        // new" flag straight from the source of truth afterwards.
+        return api.getState();
+      })
+      .then((initial) => {
+        if (initial.showWhatsNewFor) setWhatsNewVersion(initial.showWhatsNewFor);
+      })
       .catch(() => {});
   }, [init]);
+
+  const dismissWhatsNew = useCallback((version: string) => {
+    setWhatsNewVersion(null);
+    // Record the dismissal durably, best-effort: even if the IPC fails the
+    // modal is closed for this session.
+    api.markWhatsNewSeen(version).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (settings) applyTheme(settings.theme);
@@ -379,6 +397,9 @@ export default function MainWindow() {
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <WorkspacesDialog open={workspacesOpen} onClose={() => setWorkspacesOpen(false)} />
+      {whatsNewVersion && (
+        <WhatsNewModal version={whatsNewVersion} onDismiss={dismissWhatsNew} />
+      )}
       <AnimatePresence>
         {dragOver && <ImageDropOverlay />}
       </AnimatePresence>
