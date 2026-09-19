@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+/// One image attached to a note. The file lives in the workspace images
+/// directory (`data_dir/images/<workspace>/<file>`); metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemImage {
+    pub id: String,
+    /// Generated file name (`<uuid>.<ext>`) inside the workspace images dir.
+    pub file: String,
+    pub size_bytes: u64,
+}
+
 /// The only persisted item kind: plain text. Voice notes are separate
 /// `Recording` entities, not items. Kept as an enum (with a single variant)
 /// so the wire format stays stable if kinds are ever added back.
@@ -17,6 +28,14 @@ pub struct Item {
     pub content: String,
     pub title: Option<String>,
     pub url: Option<String>,
+    /// Attached images, in the order the user added them. Omitted from the
+    /// serialized form when empty so existing workspace files stay untouched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ItemImage>,
+    /// Voice recording embedded in this note (image+voice notes). `None` on
+    /// plain text notes; omitted from JSON so old files stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<Recording>,
     #[serde(default)]
     pub pinned: bool,
     pub created_at: i64,
@@ -79,6 +98,14 @@ pub struct Settings {
     pub always_on_top: bool,
     pub theme: String,
     pub note_preview_lines: u8,
+    /// App version running the previous launch ("0.2.4"). Absent until the
+    /// first recorded launch; tracked so a "what's new" note can be shown
+    /// exactly once to users who update in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_launch_version: Option<String>,
+    /// Version whose "what's new" modal the user has dismissed (or seen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whats_new_seen_version: Option<String>,
 }
 
 impl Default for Settings {
@@ -91,6 +118,8 @@ impl Default for Settings {
             always_on_top: false,
             theme: "system".into(),
             note_preview_lines: 5,
+            last_launch_version: None,
+            whats_new_seen_version: None,
         }
     }
 }
@@ -104,6 +133,10 @@ pub struct SettingsPatch {
     pub always_on_top: Option<bool>,
     pub theme: Option<String>,
     pub note_preview_lines: Option<u8>,
+    /// Records that the user has dismissed this version's "what's new"
+    /// modal. Handled only through `mark_whats_new_seen`.
+    #[serde(skip_deserializing)]
+    pub whats_new_seen_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +146,14 @@ pub struct NewItem {
     pub content: String,
     pub title: Option<String>,
     pub url: Option<String>,
+    /// Already-saved image files (from `save_image`) to attach at creation.
+    #[serde(default)]
+    pub images: Vec<ItemImage>,
+    /// Id of an already-saved recording (from `save_recording`) to embed at
+    /// creation. The backend moves the recording out of the feed into the
+    /// note and returns the note with `recording` populated.
+    #[serde(default)]
+    pub recording_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +163,10 @@ pub struct ItemPatch {
     pub title: Option<Option<String>>,
     pub url: Option<Option<String>>,
     pub pinned: Option<bool>,
+    /// Attach/remove the note's voice recording: `Some(None)` detaches (the
+    /// recording returns to the feed as a standalone voice note), `Some(id)`
+    /// embeds a saved recording. Images stay untouched by patches.
+    pub recording_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +196,8 @@ pub struct ExportSummary {
     pub recordings: usize,
     pub audio_files: usize,
     pub missing_audio: usize,
+    pub images: usize,
+    pub missing_images: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +211,8 @@ pub struct ImportSummary {
     pub recordings_skipped: usize,
     pub audio_files_restored: usize,
     pub missing_audio: usize,
+    pub image_files_restored: usize,
+    pub missing_images: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +221,8 @@ pub struct InitialState {
     pub settings: Settings,
     pub workspaces: Vec<WorkspaceInfo>,
     pub storage: StorageInfo,
+    /// Version whose "what's new" modal should show exactly once, if any.
+    pub show_whats_new_for: Option<String>,
 }
 
 #[cfg(test)]
@@ -192,6 +243,7 @@ mod tests {
     fn old_settings_files_gain_the_note_preview_default() {
         let settings: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(settings.note_preview_lines, 5);
+        assert_eq!(settings.last_launch_version, None);
     }
 
     #[test]

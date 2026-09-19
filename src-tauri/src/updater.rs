@@ -30,6 +30,12 @@ use crate::error::{AppError, AppResult};
 const GITHUB_LATEST_API: &str = "https://api.github.com/repos/emadmohagheghi/Pocket/releases/latest";
 const USER_AGENT: &str = "pocket-updater";
 
+/// Command-line marker passed to the freshly installed exe when it is
+/// relaunched after a self-update. The new process detects it (lib.rs) and
+/// guarantees the main window ends up visible — an installer-relaunched
+/// Pocket must never surface as a tray-only ghost.
+pub const POST_UPDATE_LAUNCH_MARKER: &str = "--pocket-updated";
+
 /// Platform-specific asset suffix for the bundle the release workflow builds.
 /// Windows uses the NSIS `x64-setup.exe`; Linux uses the amd64 `.deb`.
 #[cfg(target_os = "windows")]
@@ -188,13 +194,16 @@ fn download_to_temp(app: &AppHandle, url: &str) -> AppResult<std::path::PathBuf>
 /// Run the installer detached from this process, and arm a relaunch watcher:
 /// Windows uses a hidden PowerShell that waits for the installer to exit and
 /// then starts the freshly installed exe (the per-user NSIS install replaces
-/// it in place), so Pocket reopens by itself after the update.
+/// it in place), so Pocket reopens by itself after the update. The installer
+/// is also given `/R /ARGS <marker>` — its own restart path — so even if the
+/// watcher fails, the silent installer relaunches the app with the
+/// post-update visibility marker.
 #[cfg(target_os = "windows")]
 fn spawn_installer(path: &std::path::Path) -> AppResult<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let installer = std::process::Command::new(path)
-        .arg("/S") // NSIS silent install
+        .args(["/S", "/R", "/ARGS", POST_UPDATE_LAUNCH_MARKER]) // silent install, restart app afterwards
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| AppError::Storage(format!("could not launch installer: {e}")))?;
@@ -216,9 +225,10 @@ fn spawn_relaunch_watcher_windows(installer_pid: u32) {
     let script = format!(
         "Wait-Process -Id {} -ErrorAction SilentlyContinue; \
          Start-Sleep -Milliseconds 800; \
-         Start-Process -FilePath '{}'",
+         Start-Process -FilePath '{}' -ArgumentList '{}'",
         installer_pid,
-        app_exe.display()
+        app_exe.display(),
+        POST_UPDATE_LAUNCH_MARKER
     );
     let _ = std::process::Command::new("powershell")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
@@ -237,11 +247,13 @@ fn spawn_installer(path: &std::path::Path) -> AppResult<String> {
             .arg(path)
             .spawn()
             .map_err(|e| AppError::Storage(format!("could not launch installer: {e}")))?;
-        // Watcher: wait for pkexec to exit, then start the new build.
+        // Watcher: wait for pkexec to exit, then start the new build with
+        // the post-update visibility marker (mirrors the Windows flow).
         let script = format!(
             "while kill -0 {} 2>/dev/null; do sleep 0.5; done; sleep 1; \
-             nohup pocket >/dev/null 2>&1 &",
-            installer.id()
+             nohup pocket {} >/dev/null 2>&1 &",
+            installer.id(),
+            POST_UPDATE_LAUNCH_MARKER
         );
         let _ = std::process::Command::new("sh").arg("-c").arg(&script).spawn();
         return Ok(path.display().to_string());

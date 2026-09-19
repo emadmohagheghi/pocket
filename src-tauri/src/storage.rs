@@ -12,10 +12,11 @@ use crate::error::{AppError, AppResult};
 use crate::fsutil;
 use crate::models::*;
 
-const BACKUP_FORMAT_VERSION: u32 = 2;
+const BACKUP_FORMAT_VERSION: u32 = 3;
 const BACKUP_MANIFEST_NAME: &str = "backup.json";
 const MAX_BACKUP_MANIFEST_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_RECORDING_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +24,9 @@ pub(crate) struct BackupDocument {
     format_version: u32,
     scope: String,
     voice_files: String,
+    /// Present from backup format v3 (note images). Absent in v2 archives.
+    #[serde(default)]
+    image_files: String,
     exported_at: i64,
     app_version: String,
     settings: Settings,
@@ -34,8 +38,30 @@ pub(crate) struct BackupDocument {
 struct BackupWorkspace {
     #[serde(flatten)]
     meta: WorkspaceMeta,
-    items: Vec<Item>,
+    items: Vec<BackupItem>,
     recordings: Vec<BackupRecording>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupItem {
+    #[serde(flatten)]
+    item: Item,
+    /// Every attached image gets an entry here; `archive_path` is `None` when
+    /// the image file was missing on disk at export time.
+    images: Vec<BackupImage>,
+    /// Archive path of the note's embedded voice recording, when one exists
+    /// and its audio file was present at export time. The recording metadata
+    /// itself rides inside the flattened item; this only carries the file.
+    #[serde(default)]
+    recording_file: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupImage {
+    image: ItemImage,
+    archive_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +75,7 @@ struct BackupRecording {
 pub(crate) struct PreparedBackup {
     document: BackupDocument,
     audio_files: Vec<(PathBuf, String)>,
+    image_files: Vec<(PathBuf, String)>,
 }
 
 #[derive(Clone)]
@@ -58,6 +85,10 @@ pub struct Store {
     pub settings: Settings,
     pub workspaces: Vec<WorkspaceMeta>,
     pub data: HashMap<String, WorkspaceData>,
+    /// Version whose "what's new" note this launch should show, if any.
+    /// Decided once at load; fresh installs never set it. Transient (never
+    /// serialized anywhere).
+    pub whats_new_pending_version: Option<String>,
 }
 
 impl Store {
@@ -81,6 +112,17 @@ impl Store {
     pub fn recording_path(&self, ws_id: &str, file: &str) -> PathBuf {
         self.voices_dir(ws_id).join(file)
     }
+    pub fn images_dir(&self, ws_id: &str) -> PathBuf {
+        self.data_dir.join("images").join(ws_id)
+    }
+    pub fn image_path(&self, ws_id: &str, file: &str) -> PathBuf {
+        self.images_dir(ws_id).join(file)
+    }
+    /// Deleted images are parked here (not erased) so Ctrl+Z can put them
+    /// back. Cleared on startup, same as the voice trash.
+    fn image_trash_dir(&self) -> PathBuf {
+        self.data_dir.join("images").join(".trash")
+    }
     /// Deleted recordings are parked here (not erased) so Ctrl+Z can put them
     /// back. Cleared on startup: undo history is in-memory only and never
     /// survives a restart.
@@ -94,6 +136,7 @@ impl Store {
         fs::create_dir_all(&data_dir).ok();
         // Undo never survives a restart, so nothing parked for undo is needed.
         let _ = fs::remove_dir_all(data_dir.join("voices").join(".trash"));
+        let _ = fs::remove_dir_all(data_dir.join("images").join(".trash"));
 
         // Settings: fall back to defaults on missing/corrupt file (keep the
         // corrupt file around for recovery).
@@ -109,6 +152,36 @@ impl Store {
         // cannot suggest that the detector is active.
         let gaming_was_enabled = settings.gaming_detection_enabled;
         settings.gaming_detection_enabled = false;
+
+        // Version tracking for the one-shot "what's new" note:
+        // - Fresh install (no settings file): pre-seed the version so new
+        //   users NEVER see the modal.
+        // - Updating user (a recorded launch version different from the
+        //   running one, or a settings file predating version tracking):
+        //   this exact launch shows the note once, and the marker is
+        //   persisted immediately so a crash can never re-show it later.
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let is_update_launch = match &settings.last_launch_version {
+            None => {
+                let fresh_install = !data_dir.join("settings.json").exists();
+                if fresh_install {
+                    settings.last_launch_version = Some(current_version.clone());
+                    false
+                } else {
+                    true // pre-tracking install: an updating user
+                }
+            }
+            Some(prev) => prev != &current_version,
+        };
+        let whats_new_pending_version =
+            is_update_launch.then(|| current_version.clone());
+        if is_update_launch {
+            // "Exactly once" is decided at load: the modal's version is
+            // marked seen right here, before the frontend ever asks for
+            // state. The in-memory pending value only lives for this launch.
+            settings.whats_new_seen_version = Some(current_version.clone());
+        }
+        settings.last_launch_version = Some(current_version);
 
         let workspaces: Vec<WorkspaceMeta> =
             match fsutil::read_json(&data_dir.join("workspaces.json")) {
@@ -135,12 +208,52 @@ impl Store {
             data.insert(ws.id.clone(), ws_data);
         }
 
+        // Images have no feed of their own (unlike recordings), so files can
+        // survive their metadata after crashes or staging that never became a
+        // note. Sweep orphans so disk cannot grow silently.
+        {
+            let referenced: HashSet<String> = data
+                .values()
+                .flat_map(|d| d.items.iter().flat_map(|i| i.images.iter().map(|img| img.file.clone())))
+                .collect();
+            if let Ok(workspaces_root) = fs::read_dir(data_dir.join("images")) {
+                for entry in workspaces_root.flatten() {
+                    let entry_path = entry.path();
+                    if !entry_path.is_dir()
+                        || entry.file_name().to_str() == Some(".trash")
+                    {
+                        // Files at the root are stray temp writes; the undo
+                        // trash (if present) must survive untouched.
+                        if entry_path.is_file() {
+                            let _ = fs::remove_file(&entry_path);
+                        }
+                        continue;
+                    }
+                    if let Ok(files) = fs::read_dir(&entry_path) {
+                        for file in files.flatten() {
+                            let fp = file.path();
+                            if fp.is_file()
+                                && !file
+                                    .file_name()
+                                    .to_str()
+                                    .map(|name| referenced.contains(name))
+                                    .unwrap_or(false)
+                            {
+                                let _ = fs::remove_file(&fp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut store = Store {
             data_dir,
             uses_fallback_location,
             settings,
             workspaces,
             data,
+            whats_new_pending_version,
         };
         if gaming_was_enabled {
             store.persist_settings();
@@ -169,6 +282,9 @@ impl Store {
             store.settings.active_workspace_id = store.workspaces[0].id.clone();
             store.persist_settings();
         }
+        // The launch-version stamps above must survive crashes before any
+        // later settings write, so persist once per load.
+        store.persist_settings();
         store
     }
 
@@ -252,7 +368,9 @@ impl Store {
         let mut item_count = 0;
         let mut recording_count = 0;
         let mut missing_audio = 0;
+        let mut missing_images = 0;
         let mut audio_files = Vec::new();
+        let mut image_files = Vec::new();
         let mut workspaces = Vec::with_capacity(self.workspaces.len());
 
         for meta in &self.workspaces {
@@ -273,17 +391,64 @@ impl Store {
                     } else {
                         missing_audio += 1;
                         None
-                    };
-                    BackupRecording {
+                    };                    BackupRecording {
                         recording,
                         archive_path,
                     }
                 })
                 .collect();
 
+            let items = data
+                .items
+                .iter()
+                .cloned()
+                .map(|item| {
+                    let images = item
+                        .images
+                        .iter()
+                        .map(|image| {
+                            let stored_path = self.image_path(&meta.id, &image.file);
+                            let archive_path = if stored_path.is_file() {
+                                let archive_path = backup_image_path(&meta.id, &image.file);
+                                image_files.push((stored_path, archive_path.clone()));
+                                Some(archive_path)
+                            } else {
+                                missing_images += 1;
+                                None
+                            };
+                            BackupImage {
+                                image: image.clone(),
+                                archive_path,
+                            }
+                        })
+                        .collect();
+                    // A note-embedded voice recording's audio is embedded like
+                    // any standalone recording's.
+                    let recording_file = match &item.recording {
+                        Some(rec) => {
+                            let stored_path = self.recording_path(&meta.id, &rec.file);
+                            if stored_path.is_file() {
+                                let archive_path = backup_audio_path(&meta.id, &rec.file);
+                                audio_files.push((stored_path, archive_path.clone()));
+                                Some(archive_path)
+                            } else {
+                                missing_audio += 1;
+                                None
+                            }
+                        }
+                        None => None,
+                    };
+                    BackupItem {
+                        item,
+                        images,
+                        recording_file,
+                    }
+                })
+                .collect();
+
             workspaces.push(BackupWorkspace {
                 meta: meta.clone(),
-                items: data.items.clone(),
+                items,
                 recordings,
             });
         }
@@ -295,17 +460,29 @@ impl Store {
             recordings: recording_count,
             audio_files: audio_files.len(),
             missing_audio,
+            images: image_files.len(),
+            missing_images,
         };
         let document = BackupDocument {
             format_version: BACKUP_FORMAT_VERSION,
             scope: "allWorkspaces".into(),
             voice_files: "embeddedInArchive".into(),
+            image_files: "embeddedInArchive".into(),
             exported_at: now_ms(),
             app_version: env!("CARGO_PKG_VERSION").into(),
             settings: self.settings.clone(),
             workspaces,
         };
-        Ok((PreparedBackup { document, audio_files }, summary))
+        Ok(
+            (
+                PreparedBackup {
+                    document,
+                    audio_files,
+                    image_files,
+                },
+                summary,
+            )
+        )
     }
 
     pub(crate) fn write_backup_archive(
@@ -346,6 +523,19 @@ impl Store {
                 std::io::copy(&mut input, &mut archive)?;
             }
 
+            for (source, archive_path) in prepared.image_files {
+                archive
+                    .start_file(&archive_path, options)
+                    .map_err(|e| backup_archive_error("could not add image file", e))?;
+                let mut input = File::open(&source).map_err(|e| {
+                    AppError::Storage(format!(
+                        "could not read image {}: {e}",
+                        source.display()
+                    ))
+                })?;
+                std::io::copy(&mut input, &mut archive)?;
+            }
+
             let output = archive
                 .finish()
                 .map_err(|e| backup_archive_error("could not finish backup", e))?;
@@ -376,6 +566,8 @@ impl Store {
             recordings_skipped: 0,
             audio_files_restored: 0,
             missing_audio: 0,
+            image_files_restored: 0,
+            missing_images: 0,
         };
         let mut changed_workspaces = HashSet::new();
 
@@ -389,20 +581,48 @@ impl Store {
                     .insert(workspace_id.clone(), WorkspaceData::default());
                 summary.workspaces_created += 1;
                 changed_workspaces.insert(workspace_id.clone());
-            }
-
-            for item in workspace.items {
+            }            for item in workspace.items {
                 let exists = self.data[&workspace_id]
                     .items
                     .iter()
-                    .any(|existing| existing.id == item.id);
+                    .any(|existing| existing.id == item.item.id);
                 if exists {
                     summary.items_skipped += 1;
-                } else {
-                    self.data.get_mut(&workspace_id).unwrap().items.push(item);
-                    summary.items_imported += 1;
-                    changed_workspaces.insert(workspace_id.clone());
+                    continue;
                 }
+
+                for backup_image in &item.images {
+                    let image = &backup_image.image;
+                    let destination = self.image_path(&workspace_id, &image.file);
+                    if !destination.is_file() {
+                        if let Some(archive_path) = &backup_image.archive_path {
+                            extract_backup_image(&mut archive, archive_path, &destination)?;
+                            summary.image_files_restored += 1;
+                        } else {
+                            summary.missing_images += 1;
+                        }
+                    }
+                }
+                // The note's embedded voice file comes back the same way.
+                if let Some(rec) = &item.item.recording {
+                    let destination = self.recording_path(&workspace_id, &rec.file);
+                    if !destination.is_file() {
+                        if let Some(archive_path) = &item.recording_file {
+                            extract_backup_audio(&mut archive, archive_path, &destination)?;
+                            summary.audio_files_restored += 1;
+                        } else {
+                            summary.missing_audio += 1;
+                        }
+                    }
+                }
+
+                self.data
+                    .get_mut(&workspace_id)
+                    .unwrap()
+                    .items
+                    .push(item.item);
+                summary.items_imported += 1;
+                changed_workspaces.insert(workspace_id.clone());
             }
 
             for backup_recording in workspace.recordings {
@@ -506,6 +726,9 @@ impl Store {
         crate::shortcuts::diag_log("delete: removing voices dir");
         fsutil::remove_tree(&self.voices_dir(ws_id))
             .map_err(|e| AppError::Storage(format!("could not delete voice files: {e}")))?;
+        crate::shortcuts::diag_log("delete: removing images dir");
+        fsutil::remove_tree(&self.images_dir(ws_id))
+            .map_err(|e| AppError::Storage(format!("could not delete image files: {e}")))?;
         crate::shortcuts::diag_log("delete: removing workspace dir");
         fsutil::remove_tree(&self.workspace_dir(ws_id))
             .map_err(|e| AppError::Storage(format!("could not delete workspace file: {e}")))?;
@@ -532,11 +755,41 @@ impl Store {
     // ------------------------------------------------------------------ items
 
     pub fn create_item(&mut self, ws_id: &str, new: NewItem) -> AppResult<Item> {
-        if new.content.trim().is_empty() {
+        // Image-only notes are valid: the content check only fires when no
+        // images are attached.
+        if new.content.trim().is_empty() && new.images.is_empty() {
             return Err(AppError::Invalid("content cannot be empty".into()));
         }
         let content = new.content.trim().to_string();
         let url = new.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        // Only accept image files this app actually saved; client-supplied
+        // arbitrary file names would be a path-traversal risk.
+        let images: Vec<ItemImage> = new
+            .images
+            .into_iter()
+            .filter(|image| self.image_path(ws_id, &image.file).is_file())
+            .collect();
+        // An embedded voice note must exist in the workspace feed: it is
+        // moved out of the feed into the note (not copied), so undo via the
+        // usual removeRecording step never duplicates it.
+        let mut recording: Option<Recording> = None;
+        if let Some(rec_id) = new.recording_id.as_deref() {
+            let data = self.workspace_data_mut(ws_id)?;
+            let pos = data
+                .recordings
+                .iter()
+                .position(|r| r.id == rec_id)
+                .ok_or(AppError::RecordingNotFound)?;
+            recording = Some(data.recordings.remove(pos));
+        }
+        // Content rule: a note holds at most two of the three media kinds —
+        // images + voice is the only forbidden pair with text present, and
+        // any pair without text is fine.
+        if !images.is_empty() && recording.is_some() && !new.content.trim().is_empty() {
+            return Err(AppError::Invalid(
+                "a note can hold text, images or a voice note — pick two".into(),
+            ));
+        }
         let item = Item {
             id: Uuid::new_v4().to_string(),
             item_type: ItemType::Text,
@@ -546,6 +799,8 @@ impl Store {
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),
             url,
+            images,
+            recording,
             pinned: false,
             created_at: now_ms(),
             updated_at: now_ms(),
@@ -557,43 +812,173 @@ impl Store {
     }
 
     pub fn update_item(&mut self, ws_id: &str, item_id: &str, patch: ItemPatch) -> AppResult<Item> {
-        let data = self.workspace_data_mut(ws_id)?;
-        let item = data
-            .items
-            .iter_mut()
-            .find(|i| i.id == item_id)
-            .ok_or(AppError::ItemNotFound)?;
-        if let Some(c) = patch.content {
-            let c = c.trim().to_string();
-            if c.is_empty() {
-                return Err(AppError::Invalid("content cannot be empty".into()));
+        // Recordings that leave the note go back to the feed after the item
+        // borrow ends; an attached recording was removed from the feed inside
+        // the scope below.
+        let mut returned_recordings: Vec<Recording> = Vec::new();
+        let item = {
+            let data = self.workspace_data_mut(ws_id)?;
+            let item = data
+                .items
+                .iter_mut()
+                .find(|i| i.id == item_id)
+                .ok_or(AppError::ItemNotFound)?;
+            if let Some(c) = patch.content {
+                let c = c.trim().to_string();
+                // Media-only notes (images and/or an embedded voice note) have
+                // no text to protect: an empty edit removes the text, not the
+                // note.
+                if c.is_empty() && item.images.is_empty() && item.recording.is_none() {
+                    return Err(AppError::Invalid("content cannot be empty".into()));
+                }
+                item.content = c;
             }
-            item.content = c;
+            if let Some(t) = patch.title {
+                item.title = t.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            }
+            if let Some(u) = patch.url {
+                item.url = u.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            }
+            if let Some(pinned) = patch.pinned {
+                item.pinned = pinned;
+            }
+            if let Some(recording_patch) = patch.recording_id {
+                match recording_patch {
+                    // Detach: the recording returns to the workspace feed as
+                    // a standalone voice note (no file moves; metadata only).
+                    None => {
+                        if let Some(rec) = item.recording.take() {
+                            returned_recordings.push(rec);
+                        }
+                    }
+                    Some(rec_id) => {
+                        // Reject a forbidden triple early: attaching a voice
+                        // note to an image note with text would create one.
+                        if !item.images.is_empty() && !item.content.trim().is_empty() {
+                            return Err(AppError::Invalid(
+                                "a note can hold text, images or a voice note — pick two"
+                                    .into(),
+                            ));
+                        }
+                        // Same-id re-embed is a no-op; otherwise the current
+                        // recording (if any) returns to the feed and the
+                        // target one is moved in.
+                        if item.recording.as_ref().map(|r| r.id.as_str()) != Some(rec_id.as_str())
+                        {
+                            if let Some(rec) = item.recording.take() {
+                                returned_recordings.push(rec);
+                            }
+                            let pos = data
+                                .recordings
+                                .iter()
+                                .position(|r| r.id == rec_id)
+                                .ok_or(AppError::RecordingNotFound)?;
+                            item.recording = Some(data.recordings.remove(pos));
+                        }
+                    }
+                }
+            }
+            item.updated_at = now_ms();
+            item.clone()
+        };
+        if !returned_recordings.is_empty() {
+            let data = self.workspace_data_mut(ws_id)?;
+            data.recordings.extend(returned_recordings);
         }
-        if let Some(t) = patch.title {
-            item.title = t.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        }
-        if let Some(u) = patch.url {
-            item.url = u.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        }
-        if let Some(pinned) = patch.pinned {
-            item.pinned = pinned;
-        }
-        item.updated_at = now_ms();
-        let item = item.clone();
         self.persist_workspace(ws_id);
         Ok(item)
     }
 
+    /// Park a deleted image file for Ctrl+Z. Missing files are fine: the
+    /// metadata row goes away regardless.
+    fn park_image(&self, ws_id: &str, file: &str) {
+        let source = self.image_path(ws_id, file);
+        let trash_path = self.image_trash_dir().join(file);
+        if fs::create_dir_all(self.image_trash_dir()).is_ok() {
+            let _ = fs::rename(&source, &trash_path);
+        }
+    }
+
+    /// Move a note (with its images and embedded voice file) to another
+    /// workspace. Files are copied to the target workspace's media
+    /// directories; ids are preserved, so undo is restore-in-source +
+    /// remove-in-target.
+    pub fn move_item(&mut self, from_ws: &str, to_ws: &str, item_id: &str) -> AppResult<Item> {
+        if !fsutil::valid_id(to_ws) {
+            return Err(AppError::Invalid("invalid workspace id".into()));
+        }
+        self.workspace(to_ws)?;
+        let item = {
+            let data = self.workspace_data_mut(from_ws)?;
+            let pos = data
+                .items
+                .iter()
+                .position(|i| i.id == item_id)
+                .ok_or(AppError::ItemNotFound)?;
+            data.items.remove(pos)
+        };
+        // Copy attachments over before registering the note in the target:
+        // metadata without files would render broken thumbnails/audio.
+        for image in &item.images {
+            let source = self.image_path(from_ws, &image.file);
+            let destination = self.image_path(to_ws, &image.file);
+            if source.is_file() && !destination.is_file() {
+                fs::create_dir_all(self.images_dir(to_ws))
+                    .map_err(|e| AppError::Storage(format!("cannot create images directory: {e}")))?;
+                fs::copy(&source, &destination).map_err(|e| {
+                    AppError::Storage(format!("could not copy image file: {e}"))
+                })?;
+            }
+        }
+        if let Some(rec) = &item.recording {
+            let source = self.recording_path(from_ws, &rec.file);
+            let destination = self.recording_path(to_ws, &rec.file);
+            if source.is_file() && !destination.is_file() {
+                fs::create_dir_all(self.voices_dir(to_ws))
+                    .map_err(|e| AppError::Storage(format!("cannot create voices directory: {e}")))?;
+                fs::copy(&source, &destination).map_err(|e| {
+                    AppError::Storage(format!("could not copy voice file: {e}"))
+                })?;
+            }
+        }
+        let data = self.workspace_data_mut(to_ws)?;
+        data.items.push(item.clone());
+        self.persist_workspace(to_ws);
+        self.persist_workspace(from_ws);
+        Ok(item)
+    }
+
     pub fn delete_item(&mut self, ws_id: &str, item_id: &str) -> AppResult<()> {
-        let data = self.workspace_data_mut(ws_id)?;
-        let len_before = data.items.len();
-        data.items.retain(|i| i.id != item_id);
-        if data.items.len() == len_before {
-            return Err(AppError::ItemNotFound);
+        let (parked_images, embedded_recording) = {
+            let data = self.workspace_data_mut(ws_id)?;
+            let Some(pos) = data.items.iter().position(|i| i.id == item_id) else {
+                return Err(AppError::ItemNotFound);
+            };
+            let item = data.items.remove(pos);
+            let parked_images: Vec<String> =
+                item.images.iter().map(|i| i.file.clone()).collect();
+            (parked_images, item.recording)
+        };
+        for file in parked_images {
+            self.park_image(ws_id, &file);
+        }
+        if let Some(rec) = embedded_recording {
+            // The note's voice file is parked too, so Ctrl+Z restores the
+            // whole note with playable audio. Missing files stay fine: the
+            // metadata row carries on either way.
+            self.park_recording_file(ws_id, &rec.file);
         }
         self.persist_workspace(ws_id);
         Ok(())
+    }
+
+    /// Park a recording file (standalone or note-embedded) for Ctrl+Z.
+    fn park_recording_file(&self, ws_id: &str, file: &str) {
+        let source = self.recording_path(ws_id, file);
+        let trash_path = self.trash_dir().join(file);
+        if fs::create_dir_all(self.trash_dir()).is_ok() {
+            let _ = fs::rename(&source, &trash_path);
+        }
     }
 
     /// Delete many entries in one lock + one persist + one event broadcast.
@@ -607,10 +992,22 @@ impl Store {
         recording_ids: &[String],
     ) -> AppResult<usize> {
         let mut count = 0usize;
+        let mut image_files: Vec<String> = Vec::new();
+        let mut embedded_recording_files: Vec<String> = Vec::new();
         let removed_files: Vec<String> = {
             let data = self.workspace_data_mut(ws_id)?;
             let before = data.items.len();
-            data.items.retain(|i| !item_ids.contains(&i.id));
+            data.items.retain(|i| {
+                if item_ids.contains(&i.id) {
+                    image_files.extend(i.images.iter().map(|img| img.file.clone()));
+                    if let Some(rec) = &i.recording {
+                        embedded_recording_files.push(rec.file.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
             count += before - data.items.len();
 
             let before = data.recordings.len();
@@ -626,6 +1023,13 @@ impl Store {
             count += before - data.recordings.len();
             files
         };
+        // Park deleted images for undo (after the workspace-data borrow ends).
+        for file in image_files.into_iter() {
+            self.park_image(ws_id, &file);
+        }
+        for file in &embedded_recording_files {
+            self.park_recording_file(ws_id, file);
+        }
         for file in &removed_files {
             let source = self.recording_path(ws_id, file);
             let trash_path = self.trash_dir().join(file);
@@ -772,11 +1176,74 @@ impl Store {
         Ok(())
     }
 
-    // -------------------------------------------------------------------- undo
+    // ------------------------------------------------------------------ images
+
+    /// Persist an uploaded image into the workspace images directory and
+    /// return its metadata row. The caller attaches the row to an item when
+    /// the note is created (or updated).
+    pub fn save_image(&mut self, ws_id: &str, ext: &str, data_bytes: &[u8]) -> AppResult<ItemImage> {
+        if data_bytes.is_empty() {
+            return Err(AppError::Invalid("empty image".into()));
+        }
+        if data_bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return Err(AppError::Invalid("image too large".into()));
+        }
+        let ext = ext.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif") {
+            return Err(AppError::Invalid("unsupported image format".into()));
+        }
+        let id = Uuid::new_v4().to_string();
+        let file = format!("{id}.{ext}");
+
+        let dir = self.images_dir(ws_id);
+        fs::create_dir_all(&dir)
+            .map_err(|e| AppError::Storage(format!("cannot create images directory: {e}")))?;
+        let final_path = dir.join(&file);
+        let tmp_path = dir.join(format!(".{file}.tmp"));
+        {
+            use std::io::Write;
+            let mut f = fs::File::create(&tmp_path)
+                .map_err(|e| AppError::Storage(format!("cannot write image: {e}")))?;
+            f.write_all(data_bytes)
+                .map_err(|e| AppError::Storage(format!("cannot write image: {e}")))?;
+            f.sync_all()
+                .map_err(|e| AppError::Storage(format!("cannot write image: {e}")))?;
+        }
+        fs::rename(&tmp_path, &final_path)
+            .map_err(|e| AppError::Storage(format!("cannot finalize image: {e}")))?;
+
+        Ok(ItemImage {
+            id,
+            file,
+            size_bytes: data_bytes.len() as u64,
+        })
+    }
 
     /// Upsert a text item back with its original id and timestamps (a Ctrl+Z
-    /// restore, or the pre-edit snapshot of an edited item).
+    /// restore, or the pre-edit snapshot of an edited item). Images parked in
+    /// the trash by the matching delete are moved back first.
     pub fn restore_item(&mut self, ws_id: &str, item: Item) -> AppResult<()> {
+        for image in &item.images {
+            let parked = self.image_trash_dir().join(&image.file);
+            let final_path = self.image_path(ws_id, &image.file);
+            if parked.is_file() && !final_path.is_file() {
+                fs::create_dir_all(self.images_dir(ws_id))?;
+                fs::rename(&parked, &final_path).map_err(|e| {
+                    AppError::Storage(format!("could not restore image file: {e}"))
+                })?;
+            }
+        }
+        // A deleted image+voice note parks its embedded audio too.
+        if let Some(rec) = &item.recording {
+            let parked = self.trash_dir().join(&rec.file);
+            let final_path = self.recording_path(ws_id, &rec.file);
+            if parked.is_file() && !final_path.is_file() {
+                fs::create_dir_all(self.voices_dir(ws_id))?;
+                fs::rename(&parked, &final_path).map_err(|e| {
+                    AppError::Storage(format!("could not restore voice file: {e}"))
+                })?;
+            }
+        }
         let data = self.workspace_data_mut(ws_id)?;
         match data.items.iter_mut().find(|i| i.id == item.id) {
             Some(slot) => *slot = item,
@@ -861,6 +1328,17 @@ fn backup_audio_path(workspace_id: &str, file: &str) -> String {
     format!("audio/{workspace_id}/{file}")
 }
 
+fn backup_image_path(workspace_id: &str, file: &str) -> String {
+    format!("images/{workspace_id}/{file}")
+}
+
+fn has_image_extension(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 fn backup_archive_error(context: &str, error: impl std::fmt::Display) -> AppError {
     AppError::Storage(format!("{context}: {error}"))
 }
@@ -881,7 +1359,9 @@ fn validate_backup<R: Read + Seek>(
     document: &BackupDocument,
     archive: &mut ZipArchive<R>,
 ) -> AppResult<()> {
-    if document.format_version != BACKUP_FORMAT_VERSION {
+    // v2 = pre-images archives, still importable (items simply carry no
+    // images). v3 adds embedded note images.
+    if ![2, BACKUP_FORMAT_VERSION].contains(&document.format_version) {
         return Err(AppError::Invalid(format!(
             "unsupported backup version {}",
             document.format_version
@@ -909,16 +1389,85 @@ fn validate_backup<R: Read + Seek>(
         }
 
         let mut item_ids = HashSet::new();
-        for item in &workspace.items {
+        for backup_item in &workspace.items {
+            let item = &backup_item.item;
             if !fsutil::valid_id(&item.id) || !item_ids.insert(&item.id) {
                 return Err(AppError::Invalid(
                     "backup contains an invalid or duplicate item id".into(),
                 ));
             }
-            if item.content.trim().is_empty() {
+            if item.content.trim().is_empty() && item.images.is_empty() {
                 return Err(AppError::Invalid(
                     "backup contains an empty text item".into(),
                 ));
+            }
+            let mut image_ids = HashSet::new();
+            for backup_image in &backup_item.images {
+                let image = &backup_image.image;
+                if !fsutil::valid_id(&image.id) || !image_ids.insert(&image.id) {
+                    return Err(AppError::Invalid(
+                        "backup contains an invalid or duplicate image id".into(),
+                    ));
+                }
+                if !fsutil::valid_file_name(&image.file)
+                    || !has_image_extension(&image.file)
+                {
+                    return Err(AppError::Invalid(
+                        "backup contains an invalid image file name".into(),
+                    ));
+                }
+                if image.size_bytes > MAX_IMAGE_BYTES {
+                    return Err(AppError::Invalid(
+                        "backup contains an oversized image".into(),
+                    ));
+                }
+                if let Some(archive_path) = &backup_image.archive_path {
+                    let expected = backup_image_path(&workspace.meta.id, &image.file);
+                    if archive_path != &expected {
+                        return Err(AppError::Invalid(
+                            "backup contains an unsafe image path".into(),
+                        ));
+                    }
+                    let entry = archive
+                        .by_name(archive_path)
+                        .map_err(|e| backup_archive_error("backup image file is missing", e))?;
+                    if !entry.is_file() || entry.size() != image.size_bytes {
+                        return Err(AppError::Invalid(
+                            "backup image metadata does not match its file".into(),
+                        ));
+                    }
+                }
+            }
+
+            // The note's embedded voice file (format v3 only — v2 items carry
+            // no recordings at all).
+            if let Some(rec) = &backup_item.item.recording {
+                if !fsutil::valid_file_name(&rec.file) || !rec.file.ends_with(".webm") {
+                    return Err(AppError::Invalid(
+                        "backup contains an invalid note recording file name".into(),
+                    ));
+                }
+                if rec.size_bytes > MAX_RECORDING_BYTES {
+                    return Err(AppError::Invalid(
+                        "backup contains an oversized note recording".into(),
+                    ));
+                }
+                if let Some(archive_path) = &backup_item.recording_file {
+                    let expected = backup_audio_path(&workspace.meta.id, &rec.file);
+                    if archive_path != &expected {
+                        return Err(AppError::Invalid(
+                            "backup contains an unsafe audio path".into(),
+                        ));
+                    }
+                    let entry = archive
+                        .by_name(archive_path)
+                        .map_err(|e| backup_archive_error("backup audio file is missing", e))?;
+                    if !entry.is_file() || entry.size() != rec.size_bytes {
+                        return Err(AppError::Invalid(
+                            "backup recording metadata does not match its file".into(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -980,6 +1529,37 @@ fn extract_backup_audio<R: Read + Seek>(
         let mut entry = archive
             .by_name(archive_path)
             .map_err(|e| backup_archive_error("backup audio file is missing", e))?;
+        let mut output = File::create(&temporary)?;
+        std::io::copy(&mut entry, &mut output)?;
+        output.sync_all()?;
+        fs::rename(&temporary, destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn extract_backup_image<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    archive_path: &str,
+    destination: &Path,
+) -> AppResult<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::Invalid("image path has no parent".into()))?;
+    fs::create_dir_all(parent)?;
+    let file_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image.bin".into());
+    let temporary = parent.join(format!(".{file_name}.importing"));
+
+    let result = (|| -> AppResult<()> {
+        let mut entry = archive
+            .by_name(archive_path)
+            .map_err(|e| backup_archive_error("backup image file is missing", e))?;
         let mut output = File::create(&temporary)?;
         std::io::copy(&mut entry, &mut output)?;
         output.sync_all()?;
@@ -1075,6 +1655,76 @@ mod tests {
         (store, dir)
     }
 
+    #[test]
+    fn fresh_install_never_sees_whats_new() {
+        let (store, dir) = test_store();
+        assert_eq!(store.whats_new_pending_version, None);
+        assert_eq!(
+            store.settings.last_launch_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn pre_tracking_install_gets_the_whats_new_note_once() {
+        // A settings file without version markers = installed before
+        // version tracking existed (a 0.2.4 user updating in place).
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"launchOnStartup":false,"startMinimized":false,"activeWorkspaceId":"","gamingDetectionEnabled":false,"alwaysOnTop":false,"theme":"system","notePreviewLines":5}"#,
+        )
+        .unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(
+            store.whats_new_pending_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        // The one-shot marker is persisted at load, so a crash can never
+        // re-show the note.
+        assert_eq!(
+            store.settings.whats_new_seen_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let reloaded = Store::load(dir.clone(), false);
+        assert_eq!(reloaded.whats_new_pending_version, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn same_version_relaunch_does_not_re_show_whats_new() {
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = format!(
+            r#"{{"lastLaunchVersion":"{}","whatsNewSeenVersion":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION")
+        );
+        fs::write(dir.join("settings.json"), settings).unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(store.whats_new_pending_version, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn version_bump_shows_whats_new_again_for_the_new_version() {
+        let dir = std::env::temp_dir().join(format!("pocket-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"lastLaunchVersion":"0.2.4","whatsNewSeenVersion":"0.2.4"}"#,
+        )
+        .unwrap();
+        let store = Store::load(dir.clone(), false);
+        assert_eq!(
+            store.whats_new_pending_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        cleanup(&dir);
+    }
+
     fn cleanup(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
     }
@@ -1092,6 +1742,8 @@ mod tests {
                     content: "hello world".into(),
                     title: None,
                     url: None,
+                    images: Vec::new(),
+                    recording_id: None,
                 },
             )
             .unwrap();
@@ -1127,6 +1779,8 @@ mod tests {
                     content: "Rust ownership rules".into(),
                     title: None,
                     url: None,
+                    images: Vec::new(),
+                    recording_id: None,
                 },
             )
             .unwrap();
@@ -1158,6 +1812,8 @@ mod tests {
                     content: "https://example.com".into(),
                     title: None,
                     url: None,
+                    images: Vec::new(),
+                    recording_id: None,
                 },
             )
             .unwrap();
@@ -1180,6 +1836,8 @@ mod tests {
                         content: "survives restart".into(),
                         title: None,
                         url: None,
+                        images: Vec::new(),
+                        recording_id: None,
                     },
                 )
                 .unwrap();
@@ -1226,6 +1884,8 @@ mod tests {
                     content: "first workspace item".into(),
                     title: None,
                     url: None,
+                    images: Vec::new(),
+                    recording_id: None,
                 },
             )
             .unwrap();
@@ -1270,6 +1930,114 @@ mod tests {
         assert_eq!(repeated.recordings_skipped, 1);
 
         cleanup(&import_dir);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn note_with_recording_rolls_recording_into_the_item() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let rec = store
+            .save_recording(&ws.meta.id, "temp", 800, b"voicebytes")
+            .unwrap();
+        let item = store
+            .create_item(
+                &ws.meta.id,
+                NewItem {
+                    item_type: ItemType::Text,
+                    content: "note with voice".into(),
+                    title: None,
+                    url: None,
+                    images: Vec::new(),
+                    recording_id: Some(rec.id.clone()),
+                },
+            )
+            .unwrap();
+        // The recording moved out of the feed into the note (not copied).
+        assert_eq!(item.recording.as_ref().unwrap().id, rec.id);
+        assert!(store.workspace_data(&ws.meta.id).unwrap().recordings.is_empty());
+        assert!(store.recording_path(&ws.meta.id, &rec.file).exists());
+
+        // Detaching puts it back into the feed.
+        let updated = store
+            .update_item(
+                &ws.meta.id,
+                &item.id,
+                ItemPatch {
+                    recording_id: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(updated.recording.is_none());
+        assert_eq!(store.workspace_data(&ws.meta.id).unwrap().recordings.len(), 1);
+        assert!(store.recording_path(&ws.meta.id, &rec.file).exists());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn deleting_note_parks_embedded_audio_and_undo_restores_it() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let rec = store
+            .save_recording(&ws.meta.id, "temp", 800, b"voicebytes")
+            .unwrap();
+        let item = store
+            .create_item(
+                &ws.meta.id,
+                NewItem {
+                    item_type: ItemType::Text,
+                    content: "voice note".into(),
+                    title: None,
+                    url: None,
+                    images: Vec::new(),
+                    recording_id: Some(rec.id.clone()),
+                },
+            )
+            .unwrap();
+        let audio_path = store.recording_path(&ws.meta.id, &rec.file);
+        store.delete_item(&ws.meta.id, &item.id).unwrap();
+        assert!(!audio_path.exists()); // parked for undo
+        store.restore_item(&ws.meta.id, item).unwrap();
+        assert!(audio_path.exists());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn move_item_copies_media_to_the_target_workspace() {
+        let (mut store, dir) = test_store();
+        let from = store.create_workspace("From").unwrap();
+        let to = store.create_workspace("To").unwrap();
+        let image = store
+            .save_image(&from.meta.id, "png", b"fakepng")
+            .unwrap();
+        let rec = store
+            .save_recording(&from.meta.id, "temp", 800, b"voicebytes")
+            .unwrap();
+        let item = store
+            .create_item(
+                &from.meta.id,
+                NewItem {
+                    item_type: ItemType::Text,
+                    content: String::new(),
+                    title: None,
+                    url: None,
+                    images: vec![image],
+                    recording_id: Some(rec.id.clone()),
+                },
+            )
+            .unwrap();
+
+        let moved = store
+            .move_item(&from.meta.id, &to.meta.id, &item.id)
+            .unwrap();
+        assert_eq!(moved.id, item.id);
+        // Files exist in the target; source files remain for undo.
+        assert!(store
+            .image_path(&to.meta.id, &moved.images[0].file)
+            .exists());
+        assert!(store.recording_path(&to.meta.id, &moved.recording.unwrap().file).exists());
+        assert!(store.workspace_data(&from.meta.id).unwrap().items.is_empty());
         cleanup(&dir);
     }
 }

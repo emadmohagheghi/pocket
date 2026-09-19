@@ -24,11 +24,23 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__: {
       invoke(cmd: string, args?: unknown): Promise<unknown>;
+      metadata?: {
+        currentWindow?: { label?: string };
+      };
     };
   }
 }
 
 ;(function () {
+  // The image viewer must never move: it is a fixed fullscreen overlay
+  // (opened maximized, closed only via its X button). This script drags the
+  // window on almost every press by default, so it opts out entirely.
+  try {
+    if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === 'image-viewer') return
+  } catch {
+    /* no metadata: behave as any other window */
+  }
+
   const TAURI_DRAG_REGION_ATTR = 'data-tauri-drag-region'
   const INTERACTIVE_TAGS = new Set([
     'A',

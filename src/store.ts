@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "@/lib/api";
 import type {
   Item,
+  ItemImage,
   Recording,
   Settings,
   StateChangedPayload,
@@ -16,6 +17,25 @@ function errMessage(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/**
+ * The backend omits empty/absent optional fields from its JSON (images are
+ * skipped when empty, recording when None), so older notes arrive with
+ * `images`/`recording` as `undefined` instead of the empty defaults the
+ * frontend types promise. Left as-is, every existing note crashes the React
+ * tree in NoteImages — the window then stays a blank transparent card.
+ */
+function normalizeItem(raw: Item): Item {
+  return {
+    ...raw,
+    images: Array.isArray(raw.images) ? raw.images : [],
+    recording: raw.recording ?? null,
+  };
+}
+
+function normalizeWorkspaceData(raw: WorkspaceData): WorkspaceData {
+  return { items: raw.items.map(normalizeItem), recordings: raw.recordings };
 }
 
 /**
@@ -81,7 +101,11 @@ interface PocketStore {
   deleteWorkspace: (id: string) => Promise<void>;
   setActiveWorkspace: (id: string) => Promise<void>;
 
-  createItem: (content: string) => Promise<Item | null>;
+  createItem: (
+    content: string,
+    images?: ItemImage[],
+    recordingId?: string | null
+  ) => Promise<Item | null>;
   updateItem: (itemId: string, patch: Partial<Item>) => Promise<void>;
   deleteItem: (itemId: string) => Promise<void>;
   /** Toggle the todo-style done state (backed by the legacy `pinned`
@@ -140,7 +164,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             "items-changed",
             (e) => {
               if (e.payload.workspaceId === get().settings?.activeWorkspaceId) {
-                set({ data: e.payload.data });
+                set({ data: normalizeWorkspaceData(e.payload.data) });
               }
             }
           ),
@@ -184,7 +208,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
     if (!wsId) return;
     try {
       const data = await api.getItems(wsId);
-      set({ data });
+      set({ data: normalizeWorkspaceData(data) });
     } catch (e) {
       void api.log(`refreshItems FAILED: ${errMessage(e)}`);
     }
@@ -231,11 +255,18 @@ export const usePocket = create<PocketStore>((set, get) => ({
     }
   },
 
-  createItem: async (content) => {
+  createItem: async (content, images, recordingId) => {
     const wsId = get().settings?.activeWorkspaceId;
-    if (!wsId || !content.trim()) return null;
+    if (!wsId) return null;
+    // Media-only notes are valid (empty text + attachments / voice).
+    if (!content.trim() && (images?.length ?? 0) === 0 && !recordingId) return null;
     try {
-      const item = await api.createItem(wsId, { itemType: "text", content });
+      const item = await api.createItem(wsId, {
+        itemType: "text",
+        content,
+        images,
+        recordingId: recordingId ?? null,
+      });
       get().recordUndo([
         { type: "removeItem", workspaceId: wsId, itemId: item.id },
       ]);
