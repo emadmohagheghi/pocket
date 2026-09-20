@@ -412,9 +412,28 @@ export const usePocket = create<PocketStore>((set, get) => ({
   togglePlayer: () => {
     const { player, playerPlaying, playerTime, playerDuration } = get();
     if (!player) return;
-    if (!playerPlaying && playerDuration > 0 && playerTime >= playerDuration - 0.5) {
-      // Ended track: restart from the beginning instead of stalling at the end.
-      set({ playerPlaying: true, playerSeekRequest: 0 });
+    if (
+      !playerPlaying &&
+      playerDuration > 0 &&
+      playerTime >= playerDuration - 0.5
+    ) {
+      // Ended track: restart from the beginning instead of stalling at the
+      // end. The playerTime heuristic is only trusted while playback is
+      // stable; mid-scrub the optimistic scrub position can legitimately sit
+      // near the end, and restarting then would look like "jumped to start".
+      const scrubbing = get().playerScrubbing;
+      const el = document.querySelector("audio")
+        ? // The engine's element is the only <audio> in the window; prefer
+          // its real position when reachable.
+          (document.querySelector("audio") as HTMLAudioElement)
+        : null;
+      const liveTime = el && Number.isFinite(el.currentTime) ? el.currentTime : playerTime;
+      const ended = !scrubbing && (el?.ended ?? liveTime >= playerDuration - 0.5);
+      if (ended) {
+        set({ playerPlaying: true, playerSeekRequest: 0 });
+      } else {
+        set({ playerPlaying: !playerPlaying });
+      }
     } else {
       set({ playerPlaying: !playerPlaying });
     }

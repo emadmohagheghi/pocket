@@ -181,7 +181,7 @@ export function VoiceRow({
                 peaks={peaks}
                 progress={progress}
                 active={isCurrent}
-                playing={playing}
+
                 onSeek={seekWave}
                 setNode={setWaveNode}
               />
@@ -276,7 +276,7 @@ export function NoteVoicePlayer({
         peaks={peaks}
         progress={progress}
         active={isCurrent}
-        playing={playing}
+
         onSeek={seekWave}
         setNode={setWaveNode}
       />
@@ -301,10 +301,25 @@ export function VoicePlayerEngine() {
   const playerSeekRequest = usePocket((s) => s.playerSeekRequest);
   const reportPlayerProgress = usePocket((s) => s.reportPlayerProgress);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** Monotonic token for the seek currently being applied by the audio
+      element. While set, position reports are stale (the element is still at
+      its pre-seek time or seeking) and are dropped. */
+  const seekInFlightRef = useRef(0);
+  /** Tracks the last requested seek target so late `seeking` events from
+      superseded seeks can be identified. */
+  const lastSeekTargetRef = useRef<number | null>(null);
 
   const src = player ? voiceUrl(player.wsId, player.file) : "";
 
   const dur = Number.isFinite(playerDuration) ? playerDuration : 0;
+
+  // Track switch: any in-flight/pending seek belongs to the previous track
+  // (e.g. a pre-metadata scrub target) and must not leak into the new one.
+  const recordingId = player?.recordingId ?? null;
+  useEffect(() => {
+    seekInFlightRef.current = 0;
+    lastSeekTargetRef.current = null;
+  }, [recordingId, src]);
 
   /** Reports progress without ever letting an unloaded (NaN) live duration
       clobber the known length — that NaN was the "0:00 total" bug. */
@@ -317,14 +332,36 @@ export function VoicePlayerEngine() {
     );
   };
 
-  /** Applies a pending seek request; safe to call before metadata — the
-      value is clamped to the live duration when it arrives. */
+  /** True while a seek is being applied by the element itself. A dropped
+      scrub's `seeked` clears the last target, so any event naming it is
+      discarded. */
+  const isSeeking = () =>
+    seekInFlightRef.current > 0 ||
+    (audioRef.current?.seeking ?? false);
+
+  /** Applies a pending seek request. When the element has no metadata yet,
+      assigning currentTime only queues a default start position — we keep
+      the request alive so onLoadedMetadata re-applies it precisely. */
   const applySeek = (el: HTMLAudioElement, seconds: number) => {
+    const clamped = Math.max(0, seconds);
     const d = el.duration;
-    el.currentTime = Math.max(
-      0,
-      Math.min(seconds, Number.isFinite(d) ? d : seconds)
-    );
+    const ready = Number.isFinite(d) && d > 0;
+    if (!ready) {
+      // Metadata not here yet: remember the target, try a best-effort set
+      // (harmless if queued), and leave the request pending for the
+      // onLoadedMetadata handler.
+      lastSeekTargetRef.current = clamped;
+      try {
+        el.currentTime = clamped;
+      } catch {
+        /* no metadata at all — the metadata handler will apply it */
+      }
+      return;
+    }
+    const target = Math.min(clamped, d);
+    lastSeekTargetRef.current = target;
+    seekInFlightRef.current += 1;
+    el.currentTime = target;
     usePocket.setState({ playerSeekRequest: null });
   };
 
@@ -342,13 +379,15 @@ export function VoicePlayerEngine() {
     }
   }, [player, playerPlaying, src, reportPlayerProgress]);
 
-  // Smooth progress while playing.
+  // Smooth progress while playing. Reports are skipped while a seek is in
+  // flight: the element's currentTime still lags the requested position and
+  // publishing it yanks the waveform backwards mid-scrub.
   useEffect(() => {
     const el = audioRef.current;
     if (!el || !player || !playerPlaying) return;
     let raf = 0;
     const tick = () => {
-      reportLive(el, true);
+      if (!isSeeking()) reportLive(el, true);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -378,13 +417,43 @@ export function VoicePlayerEngine() {
         const pending = usePocket.getState().playerSeekRequest;
         if (pending != null && Number.isFinite(pending)) {
           applySeek(e.currentTarget, pending);
-        } else {
-          reportLive(e.currentTarget, !e.currentTarget.paused);
+          return;
         }
+        // A queued best-effort pre-metadata seek re-applies exactly here.
+        const target = lastSeekTargetRef.current;
+        if (target != null) {
+          lastSeekTargetRef.current = null;
+          seekInFlightRef.current += 1;
+          e.currentTarget.currentTime = Math.min(
+            target,
+            e.currentTarget.duration
+          );
+          return;
+        }
+        reportLive(e.currentTarget, !e.currentTarget.paused);
       }}
-      onPlay={(e) => reportLive(e.currentTarget, true)}
-      onPause={(e) => reportLive(e.currentTarget, false)}
-      onEnded={() => reportPlayerProgress(dur, dur, false)}
+      onPlay={(e) => {
+        if (!isSeeking()) reportLive(e.currentTarget, true);
+      }}
+      onPause={(e) => {
+        if (!isSeeking()) reportLive(e.currentTarget, false);
+      }}
+      onSeeking={() => {
+        /* position reports stay suppressed until seeked */
+      }}
+      onSeeked={(e) => {
+        // Publish the settled position once, then resume normal reporting.
+        seekInFlightRef.current = 0;
+        lastSeekTargetRef.current = null;
+        const el = e.currentTarget;
+        reportLive(el, !el.paused);
+      }}
+      onEnded={(e) => {
+        seekInFlightRef.current = 0;
+        lastSeekTargetRef.current = null;
+        const el = e.currentTarget;
+        reportPlayerProgress(el.duration || dur, el.duration || dur, false);
+      }}
     />
   );
 }
@@ -400,7 +469,6 @@ function VoiceWaveform({
   peaks,
   progress,
   active,
-  playing,
   onSeek,
   setNode,
 }: {
@@ -408,7 +476,6 @@ function VoiceWaveform({
   peaks: number[] | null;
   progress: number;
   active: boolean;
-  playing: boolean;
   onSeek: (clientX: number) => void;
   setNode: (node: HTMLDivElement | null) => void;
 }) {
@@ -416,6 +483,9 @@ function VoiceWaveform({
   const [width, setWidth] = useState(0);
   const draggingRef = useRef(false);
   const pendingXRef = useRef<number | null>(null);
+  // `playing` is no longer needed for bar coloring (filled bars stay primary
+  // whether paused or playing) but callers still pass it; kept out of the
+  // signature on purpose.
   const scrubRafRef = useRef(0);
 
   // Measure the row so the bar density adapts: fixed ~3px bars with 2px
@@ -503,7 +573,7 @@ function VoiceWaveform({
           key={i}
           className={cn(
             "min-w-[2px] flex-1 rounded-full transition-colors duration-150",
-            i < filled && playing ? "bg-primary" : "bg-primary/30"
+            i < filled ? "bg-primary" : "bg-primary/30"
           )}
           style={{ height: `${Math.round(Math.max(0.12, height) * 100)}%` }}
         />

@@ -68,14 +68,18 @@ function MessageScrollerItem({
   scrollAnchor = false,
   ...props
 }: React.ComponentProps<typeof MessageScrollerPrimitive.Item>) {
+  // NOTE: content-visibility is deliberately NOT applied. Items here hold
+  // media (voice waveforms, image strips) whose real heights far exceed any
+  // fixed estimate; with content-visibility the browser swaps the estimate
+  // in and out as rows scroll past the viewport, and each swap resyncs from
+  // an estimated height — visible as the feed position jumping back and
+  // forth during back-and-forth scrolling. The feed is small enough that
+  // rendering all rows is cheap.
   return (
     <MessageScrollerPrimitive.Item
       data-slot="message-scroller-item"
       scrollAnchor={scrollAnchor}
-      className={cn(
-        "min-w-0 shrink-0 [contain-intrinsic-size:auto_10rem] [content-visibility:auto]",
-        className
-      )}
+      className={cn("min-w-0 shrink-0", className)}
       {...props}
     />
   )
