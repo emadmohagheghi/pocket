@@ -70,7 +70,7 @@ export function ItemRow({
   const [localEditing, setLocalEditing] = useState(false);
   const [draft, setDraft] = useState(item.content);
   const rowRef = useRef<HTMLLIElement>(null);
-  const previewRef = useRef<HTMLParagraphElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const collapseEnabled = previewLineLimit > 0;
   const canCollapse = collapseEnabled && isExpandable;
@@ -410,7 +410,7 @@ function ItemBody({
   previewStyle: { WebkitLineClamp: number } | undefined;
   expanded: boolean;
   setExpanded: (value: boolean | ((current: boolean) => boolean)) => void;
-  previewRef: React.RefObject<HTMLParagraphElement | null>;
+  previewRef: React.RefObject<HTMLDivElement | null>;
   wsId: string;
 }) {
   const open = expanded;
@@ -428,7 +428,7 @@ function ItemBody({
             previewRef={previewRef}
           />
         ) : (
-          <p
+          <div
             ref={previewRef}
             dir="auto"
             style={previewStyle}
@@ -439,7 +439,7 @@ function ItemBody({
             )}
           >
             <NoteText text={item.content} done={done} />
-          </p>
+          </div>
         )
       ) : null}
       {item.recording && (
@@ -464,12 +464,12 @@ function CollapsibleItemBody({
   open: boolean;
   setExpanded: (value: boolean | ((current: boolean) => boolean)) => void;
   previewStyle: { WebkitLineClamp: number } | undefined;
-  previewRef: React.RefObject<HTMLParagraphElement | null>;
+  previewRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <Collapsible open={open} onOpenChange={setExpanded}>
       <div className="grid min-w-0">
-        <p
+        <div
           ref={previewRef}
           dir="auto"
           aria-hidden={open}
@@ -481,13 +481,13 @@ function CollapsibleItemBody({
           )}
         >
           <NoteText text={item.content} done={done} />
-        </p>
+        </div>
 
         <CollapsibleContent
           aria-hidden={!open}
           className="col-start-1 row-start-1 min-h-0 min-w-0 self-start overflow-hidden data-[state=closed]:pointer-events-none data-[state=closed]:animate-[pocket-collapsible-up_180ms_ease-in] data-[state=open]:animate-[pocket-collapsible-down_220ms_ease-out] motion-reduce:animate-none"
         >
-          <p
+          <div
             dir="auto"
             className={cn(
               "whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [overflow-wrap:anywhere]",
@@ -495,7 +495,7 @@ function CollapsibleItemBody({
             )}
           >
             <NoteText text={item.content} done={done} />
-          </p>
+          </div>
         </CollapsibleContent>
       </div>
 

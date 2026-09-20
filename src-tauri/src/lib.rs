@@ -1,3 +1,4 @@
+mod clipboard_html;
 mod commands;
 mod error;
 mod fsutil;
@@ -150,6 +151,7 @@ pub fn run() {
             commands::rename_recording,
             commands::delete_recording,
             commands::copy_to_clipboard,
+            commands::convert_html_to_markdown,
             commands::update_settings,
             commands::mark_whats_new_seen,
             commands::get_gaming_state,

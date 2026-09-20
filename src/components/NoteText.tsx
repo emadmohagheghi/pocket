@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 
 import { Kbd } from "@/components/ui/kbd";
 import {
@@ -7,7 +10,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
-import { cn, normalizeUrl, splitLinks } from "@/lib/utils";
+import { normalizeUrl } from "@/lib/utils";
 
 /** macOS opens with ⌘; everything else says Ctrl. */
 const MODIFIER_KEY = /Mac|iPhone|iPad/.test(navigator.userAgent)
@@ -17,44 +20,51 @@ const MODIFIER_KEY = /Mac|iPhone|iPad/.test(navigator.userAgent)
 /** Hover time before the "how to open" tooltip appears. */
 const TOOLTIP_DELAY_MS = 350;
 
-/**
- * Note text with inline link detection: URLs render as links that announce
- * themselves with a short-hover tooltip and open on Ctrl+Click (⌘+Click on
- * macOS). Plain clicks fall through, so text selection and row selection
- * keep working; detection is render-time only, nothing is persisted.
- */
-export function NoteText({ text, done }: { text: string; done: boolean }) {
-  const segments = useMemo(() => splitLinks(text), [text]);
-  return (
-    <>
-      {segments.map((segment, i) =>
-        segment.url ? (
-          <NoteLink
-            key={i}
-            url={segment.url}
-            done={done}
-            // A single link spanning the whole note keeps the pre-existing
-            // standalone link look; links inside larger text stay
-            // persistently underlined so they are discoverable.
-            standalone={segments.length === 1}
-          />
-        ) : (
-          <span key={i}>{segment.text}</span>
-        )
-      )}
-    </>
-  );
-}
+/** Plugins: GFM (tables, strikethrough, task lists, autolinks) + single
+ * newlines become <br> so plain multiline notes keep their visual layout. */
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 
-/** One detected URL inside a note. */
-function NoteLink({
-  url,
+/**
+ * Note text with markdown rendering. Notes store plain text (or markdown
+ * produced by rich capture/paste); rendering turns headings, emphasis,
+ * lists, links and GFM tables into styled elements while keeping the row
+ * interactive — selection, Ctrl+Click links, and the done strike. Detection
+ * is render-time only, nothing is persisted.
+ */
+export const NoteText = memo(function NoteText({
+  text,
   done,
-  standalone,
 }: {
-  url: string;
+  text: string;
   done: boolean;
-  standalone: boolean;
+}) {
+  return (
+    <div className="note-md">
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        components={{
+          a: (props) => <NoteLink {...props} done={done} />,
+          img: () => null,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
+/**
+ * A link inside a note — either an autolink detected by remark-gfm in plain
+ * text or an explicit markdown `[label](url)` link.
+ */
+function NoteLink({
+  href: mdHref,
+  children,
+  done,
+}: {
+  href?: string;
+  children?: React.ReactNode;
+  done: boolean;
 }) {
   const [tipOpen, setTipOpen] = useState(false);
   const hoverTimer = useRef<number | undefined>(undefined);
@@ -67,8 +77,23 @@ function NoteLink({
     setTipOpen(false);
   };
 
+  // Only real http(s) targets are openable (blocks javascript: etc. from
+  // markdown sources). Detection links normalize their www shorthand.
+  let href: string | null = null;
+  if (mdHref) {
+    try {
+      const normalized = normalizeUrl(mdHref);
+      const parsed = new URL(normalized);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        href = normalized;
+      }
+    } catch {
+      href = null;
+    }
+  }
+
   return (
-    <Tooltip open={tipOpen}>
+    <Tooltip open={href ? tipOpen : false}>
       <TooltipTrigger asChild>
         <span
           role="link"
@@ -86,21 +111,18 @@ function NoteLink({
           onPointerDown={close}
           onClick={(event) => {
             // Plain click: do nothing here, the row selects as usual.
-            if (!(event.ctrlKey || event.metaKey)) return;
+            if (!(event.ctrlKey || event.metaKey) || !href) return;
             event.preventDefault();
             event.stopPropagation();
             close();
-            void api.openUrl(normalizeUrl(url));
+            void api.openUrl(href);
           }}
-          className={cn(
-            "cursor-pointer underline-offset-2",
-            standalone
-              ? "hover:underline"
-              : "underline decoration-current/40 hover:decoration-current",
-            done ? "text-inherit" : "text-primary"
-          )}
+          className={
+            "cursor-pointer underline decoration-current/40 underline-offset-2 hover:decoration-current" +
+            (done ? " text-inherit" : " text-primary")
+          }
         >
-          {url}
+          {children}
         </span>
       </TooltipTrigger>
       <TooltipContent side="top" className="px-2 py-1">

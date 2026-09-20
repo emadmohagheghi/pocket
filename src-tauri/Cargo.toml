@@ -28,6 +28,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 zip = { version = "=8.6.0", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls"] }
+htmd = "0.5.5"
 
 [target."cfg(windows)".dependencies]
 webview2-com = "0.38"

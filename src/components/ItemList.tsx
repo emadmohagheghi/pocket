@@ -650,6 +650,31 @@ export function AddBar({ staging }: { staging: StagingApi }) {
                   setValue("");
                 }
               }}
+              onPaste={(event) => {
+                // Rich paste: when the source provides an HTML flavor (browsers,
+                // Word, editors), convert it to markdown with the backend's
+                // engine so captured and pasted notes render identically.
+                // Plain-text-only sources fall through to the default insert.
+                const html = event.clipboardData.getData("text/html");
+                if (!html.trim()) return;
+                event.preventDefault();
+                void api
+                  .convertHtmlToMarkdown(html)
+                  .then((md) => {
+                    const insert = md || event.clipboardData.getData("text/plain");
+                    if (!insert) return;
+                    const target = event.currentTarget;
+                    const start = target.selectionStart ?? value.length;
+                    const end = target.selectionEnd ?? value.length;
+                    const next = value.slice(0, start) + insert + value.slice(end);
+                    setValue(next);
+                    // Caret lands after the inserted markdown.
+                    requestAnimationFrame(() => {
+                      const pos = start + insert.length;
+                      target.setSelectionRange(pos, pos);
+                    });
+                  });
+              }}
               placeholder="Add a note or a prompt…"
               aria-label="Add a text item"
               rows={2}

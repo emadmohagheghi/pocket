@@ -762,6 +762,14 @@ pub fn copy_to_clipboard(app: AppHandle, text: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Frontend helper for rich paste: converts an HTML flavor to markdown with
+/// the same engine the capture grab uses, so both entry points produce
+/// identical notes. Returns an empty string when there is nothing to keep.
+#[tauri::command]
+pub fn convert_html_to_markdown(html: String) -> String {
+    crate::clipboard_html::html_to_markdown(&html)
+}
+
 // ------------------------------------------------------------------ settings
 
 #[tauri::command]

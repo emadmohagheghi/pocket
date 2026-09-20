@@ -276,3 +276,90 @@ textarea {
   outline: none !important;
   box-shadow: none !important;
 }
+
+/* ---------------------------------------------------------------------------
+   Markdown in notes (NoteText)
+   Compact scale that fits the 14px note rows: real headings, emphasis and
+   lists without inflating card heights. Inline code and GFM tables get a
+   subtle card-flavored surface; selection styling follows the note text.
+--------------------------------------------------------------------------- */
+.note-md {
+  /* The renderer wraps block content in <p> even for one-liners; tighten so
+     spacing matches the old plain-text line height. */
+  & > :first-child { margin-top: 0; }
+  & > :last-child { margin-bottom: 0; }
+  & p { margin: 0.15em 0; }
+
+  & h1, & h2, & h3, & h4, & h5, & h6 {
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 0.5em 0 0.2em;
+  }
+  & h1 { font-size: 1.2em; }
+  & h2 { font-size: 1.12em; }
+  & h3, & h4 { font-size: 1.05em; }
+  & h5, & h6 { font-size: 1em; }
+
+  & ul, & ol {
+    margin: 0.15em 0;
+    padding-inline-start: 1.4em;
+  }
+  & ul { list-style: disc; }
+  & ol { list-style: decimal; }
+  & li { margin: 0.1em 0; }
+  & li > ul, & li > ol { margin: 0.1em 0; }
+
+  & blockquote {
+    margin: 0.3em 0;
+    padding-inline-start: 0.7em;
+    border-inline-start: 3px solid var(--border);
+    color: var(--muted-foreground);
+  }
+
+  & code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--muted);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+  }
+  & pre {
+    margin: 0.3em 0;
+    padding: 0.5em 0.7em;
+    background: var(--muted);
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  & pre code {
+    background: transparent;
+    padding: 0;
+    font-size: 0.85em;
+  }
+
+  & hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0.6em 0;
+  }
+
+  & table {
+    border-collapse: collapse;
+    margin: 0.3em 0;
+    font-size: 0.92em;
+  }
+  & th, & td {
+    border: 1px solid var(--border);
+    padding: 0.2em 0.5em;
+    text-align: start;
+  }
+  & th { font-weight: 600; background: var(--muted); }
+
+  /* Task list checkboxes come from GFM; the real interactive checkbox is the
+     row's own, so these render as read-only indicators. */
+  & input[type="checkbox"] {
+    margin-inline-end: 0.35em;
+    accent-color: #0a84ff;
+  }
+  & li:has(> input[type="checkbox"]) { list-style: none; }
+  & li:has(> input[type="checkbox"])::before { content: none; }
+}

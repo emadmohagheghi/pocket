@@ -18,6 +18,8 @@ import type {
 
 export const api = {
   getState: () => invoke<InitialState>("get_state"),
+  convertHtmlToMarkdown: (html: string) =>
+    invoke<string>("convert_html_to_markdown", { html }),
   frontendReady: () => invoke<void>("frontend_ready"),
   markWhatsNewSeen: (version: string) =>
     invoke<void>("mark_whats_new_seen", { version }),
