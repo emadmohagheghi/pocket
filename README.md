@@ -12,12 +12,18 @@ Pocket is currently in early development. Release builds target Windows x64
 - Capture selected text from any application with a double press of Left Shift
   (Windows). The text is saved straight into the active workspace — no window
   opens; a brief on-screen confirmation is shown instead.
-- Record voice notes from the main window or the system tray.
+- Record voice notes from the main window or the system tray, with a waveform
+  scrubber for precise seeking.
+- Write notes in markdown, including rich paste from HTML (from browsers,
+  chat apps, and so on), with inline links that open on hold-Ctrl-and-click.
 - Organize text and recordings into independent workspaces.
 - Search the active workspace as you type.
 - Mark text and voice notes as done, todo-style.
-- Select multiple entries to copy them, copy them as a numbered list, merge
-  text notes, or delete them — with undo.
+- Select multiple entries to copy them, copy them as a numbered list, or
+  delete them — with single-step undo. Merging notes folds their text into
+  the oldest note, moves its images along, and releases embedded voice notes
+  back to the feed; media files are never lost and undo reverts the whole
+  merge at once.
 - Export and import complete backup archives, including audio files.
 - Optionally start Pocket automatically at login.
 - Keep all application data local, with no account, cloud service, telemetry,
@@ -72,10 +78,13 @@ PocketData/
   workspaces.json
   workspaces/<id>/workspace.json
   voices/<id>/<recording>.webm
+  images/<id>/<image>.<ext>
 ```
 
-Writes to Pocket's JSON data files are atomic. Voice playback uses a restricted
-local protocol that only exposes recordings registered in workspace metadata.
+Writes to Pocket's JSON data files are atomic. Media playback (voice and
+images) uses restricted local protocols that only expose files registered in
+workspace metadata, with HTTP range support so voice seeking never re-downloads
+the file.
 
 ## Development
 
@@ -89,6 +98,7 @@ Requirements:
 ```powershell
 pnpm install
 pnpm tauri dev
+pnpm test
 pnpm build
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
