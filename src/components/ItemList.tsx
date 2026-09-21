@@ -97,6 +97,10 @@ export interface FeedActions {
   moveSelectedTo: (workspaceId: string, workspaceName: string) => void;
   deleteSelected: () => void;
   selectedTextIds: string[];
+  /** ≥2 text notes selected: the merge would fold into a valid target. */
+  canMerge: boolean;
+  /** ≥2 selected entries with text content to copy. */
+  canCopyAsList: boolean;
 }
 
 export function ItemList() {
@@ -142,6 +146,22 @@ export function ItemList() {
             e.kind === "text" && selectedIds.has(e.key)
         )
         .map((e) => e.item.id),
+    [entries, selectedIds]
+  );
+
+  /** Merge needs ≥2 text notes: voice entries contribute nothing to a
+      merged note, so they never make an otherwise-impossible merge valid. */
+  const canMerge = selectedTextIds.length >= 2;
+
+  /** Copy-as-List numbers the copied entries, which only reads as a list
+      when at least two entries carry text to copy. */
+  const canCopyAsList = useMemo(
+    () =>
+      entries.filter(
+        (e) =>
+          selectedIds.has(e.key) &&
+          (e.kind === "text" ? e.item.content.trim() !== "" : true)
+      ).length >= 2,
     [entries, selectedIds]
   );
 
@@ -354,10 +374,10 @@ export function ItemList() {
         copySelected(false);
       } else if (mod && e.shiftKey && e.code === "KeyC") {
         e.preventDefault();
-        copySelected(true);
+        if (canCopyAsList) copySelected(true);
       } else if (mod && e.shiftKey && e.code === "KeyM") {
         e.preventDefault();
-        mergeSelected();
+        if (canMerge) mergeSelected();
       } else if (e.code === "Space") {
         e.preventDefault();
         toggleDoneSelected();
@@ -384,6 +404,8 @@ export function ItemList() {
     clearSelection,
     deleteSelected,
     undo,
+    canMerge,
+    canCopyAsList,
   ]);
 
   const actions: FeedActions = {
@@ -398,6 +420,8 @@ export function ItemList() {
     moveSelectedTo,
     deleteSelected,
     selectedTextIds,
+    canMerge,
+    canCopyAsList,
   };
 
   const renderEntry = (entry: FeedEntry) =>

@@ -250,6 +250,7 @@ export function ItemRow({
         <ContextMenuShortcut>⌃C</ContextMenuShortcut>
       </ContextMenuItem>
       <ContextMenuItem
+        disabled={!actions.canCopyAsList}
         onSelect={() => {
           ensureSelected();
           actions.copySelected(true);
@@ -287,7 +288,7 @@ export function ItemRow({
         <ContextMenuShortcut>⏎</ContextMenuShortcut>
       </ContextMenuItem>
       <ContextMenuItem
-        disabled={actions.selectedTextIds.length < 2}
+        disabled={!actions.canMerge}
         onSelect={() => {
           actions.mergeSelected();
         }}
