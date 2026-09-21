@@ -1,4 +1,4 @@
-import { Sparkles, ImageIcon } from "lucide-react";
+import { AudioLines, Sparkles, Combine } from "lucide-react";
 
 import {
   AlertDialog,
@@ -14,7 +14,8 @@ import {
  * One-shot "what's new" note. The backend decides eligibility (in-place
  * update + not dismissed before — see `whats_new_pending_version`) and hands
  * the version down in the initial state; dismissing records that version so
- * the modal never appears again.
+ * the modal never appears again. The highlights below describe the current
+ * release; update them with each release's headline changes.
  */
 export function WhatsNewModal({
   version,
@@ -33,15 +34,30 @@ export function WhatsNewModal({
           </AlertDialogMedia>
           <AlertDialogTitle>Welcome to Pocket v{version}</AlertDialogTitle>
         </AlertDialogHeader>
-        <div className="flex gap-3">
-          <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-            <ImageIcon className="size-4" />
+        <div className="flex flex-col gap-3">
+          <div className="flex gap-3">
+            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+              <AudioLines className="size-4" />
+            </div>
+            <div>
+              <div className="text-sm font-medium">Smoother voice playback</div>
+              <div className="text-[13px] text-muted-foreground">
+                Scrub back and forth freely — seeking no longer jumps to the
+                start, and deleting a playing voice now stops playback.
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-medium">Images in notes</div>
-            <div className="text-[13px] text-muted-foreground">
-              Attach images by dropping them into the window or with Ctrl+V.
-              Images can also share a note with a voice recording.
+          <div className="flex gap-3">
+            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+              <Combine className="size-4" />
+            </div>
+            <div>
+              <div className="text-sm font-medium">Lossless note merging</div>
+              <div className="text-[13px] text-muted-foreground">
+                Merging notes now keeps their images and releases embedded
+                voices back to the feed — nothing is lost, and Ctrl+Z reverts
+                the whole merge at once.
+              </div>
             </div>
           </div>
         </div>
