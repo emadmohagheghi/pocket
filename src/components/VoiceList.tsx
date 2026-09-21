@@ -321,6 +321,14 @@ export function VoicePlayerEngine() {
     lastSeekTargetRef.current = null;
   }, [recordingId, src]);
 
+  // Stopping unmounts the engine (player -> null removes the <audio>), and
+  // a detached element keeps sounding in Chromium unless paused explicitly.
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+    };
+  }, []);
+
   /** Reports progress without ever letting an unloaded (NaN) live duration
       clobber the known length — that NaN was the "0:00 total" bug. */
   const reportLive = (el: HTMLAudioElement, playing: boolean) => {

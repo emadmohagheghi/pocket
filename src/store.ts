@@ -51,6 +51,32 @@ export type UndoStep =
 
 const UNDO_HISTORY_LIMIT = 10;
 
+/** Stop shared playback when its track no longer exists: the recording was
+    deleted (directly, bulk-deleted, or inside a deleted note) or its whole
+    workspace is gone. Called after workspace data/state updates; `wsId`
+    (when given) restricts the check to that workspace's fresh data so
+    switching workspaces doesn't interrupt playback. */
+function stopPlayerIfGone(
+  s: Pick<PocketStore, "player" | "data" | "workspaces" | "stopPlayer">,
+  wsId?: string
+) {
+  const player = s.player;
+  if (!player) return;
+  if (wsId === undefined) {
+    // Workspace-level check only (state-changed): `data` here may belong to
+    // any workspace, so a recording lookup would be meaningless.
+    if (!s.workspaces.some((w) => w.id === player.wsId)) s.stopPlayer();
+    return;
+  }
+  if (wsId !== player.wsId || !s.data) return;
+  const stillThere =
+    s.data.recordings.some((r) => r.id === player.recordingId) ||
+    s.data.items.some(
+      (i) => i.recording && i.recording.id === player.recordingId
+    );
+  if (!stillThere) s.stopPlayer();
+}
+
 interface PlayerTrack {
   recordingId: string;
   name: string;
@@ -156,6 +182,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             const prevActive = get().settings?.activeWorkspaceId;
             const { settings, workspaces } = e.payload;
             set({ settings, workspaces });
+            stopPlayerIfGone(get());
             if (settings.activeWorkspaceId !== prevActive) {
               void get().refreshItems();
             }
@@ -165,6 +192,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             (e) => {
               if (e.payload.workspaceId === get().settings?.activeWorkspaceId) {
                 set({ data: normalizeWorkspaceData(e.payload.data) });
+                stopPlayerIfGone(get(), e.payload.workspaceId);
               }
             }
           ),
@@ -209,6 +237,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
     try {
       const data = await api.getItems(wsId);
       set({ data: normalizeWorkspaceData(data) });
+      stopPlayerIfGone(get(), wsId);
     } catch (e) {
       void api.log(`refreshItems FAILED: ${errMessage(e)}`);
     }
