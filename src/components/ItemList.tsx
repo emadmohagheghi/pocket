@@ -149,9 +149,22 @@ export function ItemList() {
     [entries, selectedIds]
   );
 
-  /** Merge needs ≥2 text notes: voice entries contribute nothing to a
-      merged note, so they never make an otherwise-impossible merge valid. */
-  const canMerge = selectedTextIds.length >= 2;
+  /** Merge needs ≥2 text notes AND a shape the backend accepts: the merged
+      note must not end up holding text, images and a voice note at once.
+      Standalone voices selected alongside notes are left untouched and don't
+      count. Mirrors merge_items' validation exactly, so the menu item is
+      disabled precisely when the merge would be rejected. */
+  const canMerge = useMemo(() => {
+    const notes = entries.filter(
+      (e): e is { key: string; kind: "text"; item: Item } =>
+        e.kind === "text" && selectedIds.has(e.key)
+    );
+    if (notes.length < 2) return false;
+    const hasText = notes.some((e) => e.item.content.trim() !== "");
+    const hasImages = notes.some((e) => e.item.images.length > 0);
+    const hasVoice = notes.some((e) => e.item.recording !== null);
+    return !(hasText && hasImages && hasVoice);
+  }, [entries, selectedIds]);
 
   /** Copy-as-List numbers the copied entries, which only reads as a list
       when at least two entries carry text to copy. */
@@ -252,14 +265,9 @@ export function ItemList() {
       .map((e) => e.item.id);
     if (noteIds.length < 2) return;
     void mergeItems(noteIds).then((ok) => {
-      if (!ok) {
-        toast.add({
-          title: "Merge Not Possible",
-          description: "Merging would combine text, images and a voice note in one note.",
-          type: "error",
-        });
-        return;
-      }
+      // !ok only happens if the selection changed between open and click
+      // (the store already logged it); the disabled item is the UX contract.
+      if (!ok) return;
       toast.add({ title: "Notes Merged", type: "success" });
     });
     setSelectedIds(new Set());
