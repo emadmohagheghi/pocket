@@ -121,8 +121,8 @@ pub fn frontend_ready(app: AppHandle) -> AppResult<()> {
 
     // A relaunch straight after a self-update always shows the window: the
     // user asked for the update, so opening into the tray looks broken.
-    let post_update_launch = std::env::args()
-        .any(|arg| arg == crate::updater::POST_UPDATE_LAUNCH_MARKER);
+    let post_update_launch =
+        std::env::args().any(|arg| arg == crate::updater::POST_UPDATE_LAUNCH_MARKER);
 
     if show_was_requested || !start_minimized || post_update_launch {
         show_main_window_now(&app);
@@ -476,6 +476,25 @@ pub fn apply_undo(app: AppHandle, steps: Vec<UndoStep>) -> AppResult<()> {
     Ok(())
 }
 
+/// Merge several selected notes into their oldest one in one atomic
+/// backend operation — text concatenates, images move, embedded voices are
+/// released to the feed. Media is never parked or trashed, so undo is
+/// metadata-only and lossless.
+#[tauri::command]
+pub fn merge_items(
+    app: AppHandle,
+    workspace_id: String,
+    source_ids: Vec<String>,
+) -> AppResult<MergeOutcome> {
+    let outcome = {
+        let store = app.state::<Mutex<Store>>();
+        let mut store = store.lock().unwrap();
+        store.merge_items(&workspace_id, &source_ids)?
+    };
+    items_changed(&app, &workspace_id);
+    Ok(outcome)
+}
+
 #[tauri::command]
 pub fn update_item(
     app: AppHandle,
@@ -609,10 +628,9 @@ pub fn save_image(app: AppHandle, request: tauri::ipc::Request) -> AppResult<Ite
         store.save_image(workspace_id, ext, &bytes)
     };
     match &result {
-        Ok(img) => crate::shortcuts::debug_log(&format!(
-            "save_image ok id={} file={}",
-            img.id, img.file
-        )),
+        Ok(img) => {
+            crate::shortcuts::debug_log(&format!("save_image ok id={} file={}", img.id, img.file))
+        }
         Err(e) => crate::shortcuts::debug_log(&format!("save_image FAILED: {e}")),
     }
     result

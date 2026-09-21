@@ -97,6 +97,15 @@ export interface ImportSummary {
   missingImages: number;
 }
 
+/** Result of merging several notes: the surviving target, the source notes
+    that were folded into it, and the voice notes released to the feed. The
+    inverse of these three lists is recorded as ONE undo action. */
+export interface MergeOutcome {
+  target: Item;
+  removed: Item[];
+  released: Recording[];
+}
+
 export interface InitialState {
   settings: Settings;
   workspaces: WorkspaceInfo[];

@@ -173,8 +173,7 @@ impl Store {
             }
             Some(prev) => prev != &current_version,
         };
-        let whats_new_pending_version =
-            is_update_launch.then(|| current_version.clone());
+        let whats_new_pending_version = is_update_launch.then(|| current_version.clone());
         if is_update_launch {
             // "Exactly once" is decided at load: the modal's version is
             // marked seen right here, before the frontend ever asks for
@@ -214,14 +213,16 @@ impl Store {
         {
             let referenced: HashSet<String> = data
                 .values()
-                .flat_map(|d| d.items.iter().flat_map(|i| i.images.iter().map(|img| img.file.clone())))
+                .flat_map(|d| {
+                    d.items
+                        .iter()
+                        .flat_map(|i| i.images.iter().map(|img| img.file.clone()))
+                })
                 .collect();
             if let Ok(workspaces_root) = fs::read_dir(data_dir.join("images")) {
                 for entry in workspaces_root.flatten() {
                     let entry_path = entry.path();
-                    if !entry_path.is_dir()
-                        || entry.file_name().to_str() == Some(".trash")
-                    {
+                    if !entry_path.is_dir() || entry.file_name().to_str() == Some(".trash") {
                         // Files at the root are stray temp writes; the undo
                         // trash (if present) must survive untouched.
                         if entry_path.is_file() {
@@ -391,7 +392,8 @@ impl Store {
                     } else {
                         missing_audio += 1;
                         None
-                    };                    BackupRecording {
+                    };
+                    BackupRecording {
                         recording,
                         archive_path,
                     }
@@ -473,25 +475,23 @@ impl Store {
             settings: self.settings.clone(),
             workspaces,
         };
-        Ok(
-            (
-                PreparedBackup {
-                    document,
-                    audio_files,
-                    image_files,
-                },
-                summary,
-            )
-        )
+        Ok((
+            PreparedBackup {
+                document,
+                audio_files,
+                image_files,
+            },
+            summary,
+        ))
     }
 
     pub(crate) fn write_backup_archive(
         destination: &Path,
         prepared: PreparedBackup,
     ) -> AppResult<()> {
-        let parent = destination.parent().ok_or_else(|| {
-            AppError::Invalid("export path has no parent directory".into())
-        })?;
+        let parent = destination
+            .parent()
+            .ok_or_else(|| AppError::Invalid("export path has no parent directory".into()))?;
         fs::create_dir_all(parent)?;
         let file_name = destination
             .file_name()
@@ -502,8 +502,8 @@ impl Store {
         let result = (|| -> AppResult<()> {
             let output = File::create(&temporary)?;
             let mut archive = ZipWriter::new(output);
-            let options = SimpleFileOptions::default()
-                .compression_method(CompressionMethod::Stored);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
             archive
                 .start_file(BACKUP_MANIFEST_NAME, options)
@@ -528,10 +528,7 @@ impl Store {
                     .start_file(&archive_path, options)
                     .map_err(|e| backup_archive_error("could not add image file", e))?;
                 let mut input = File::open(&source).map_err(|e| {
-                    AppError::Storage(format!(
-                        "could not read image {}: {e}",
-                        source.display()
-                    ))
+                    AppError::Storage(format!("could not read image {}: {e}", source.display()))
                 })?;
                 std::io::copy(&mut input, &mut archive)?;
             }
@@ -552,8 +549,8 @@ impl Store {
 
     pub(crate) fn import_backup_archive(&mut self, source: &Path) -> AppResult<ImportSummary> {
         let input = File::open(source)?;
-        let mut archive = ZipArchive::new(input)
-            .map_err(|e| backup_archive_error("invalid ZIP backup", e))?;
+        let mut archive =
+            ZipArchive::new(input).map_err(|e| backup_archive_error("invalid ZIP backup", e))?;
         let document = read_backup_manifest(&mut archive)?;
         validate_backup(&document, &mut archive)?;
 
@@ -581,7 +578,8 @@ impl Store {
                     .insert(workspace_id.clone(), WorkspaceData::default());
                 summary.workspaces_created += 1;
                 changed_workspaces.insert(workspace_id.clone());
-            }            for item in workspace.items {
+            }
+            for item in workspace.items {
                 let exists = self.data[&workspace_id]
                     .items
                     .iter()
@@ -761,7 +759,10 @@ impl Store {
             return Err(AppError::Invalid("content cannot be empty".into()));
         }
         let content = new.content.trim().to_string();
-        let url = new.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        let url = new
+            .url
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
         // Only accept image files this app actually saved; client-supplied
         // arbitrary file names would be a path-traversal risk.
         let images: Vec<ItemImage> = new
@@ -856,15 +857,13 @@ impl Store {
                         // note to an image note with text would create one.
                         if !item.images.is_empty() && !item.content.trim().is_empty() {
                             return Err(AppError::Invalid(
-                                "a note can hold text, images or a voice note — pick two"
-                                    .into(),
+                                "a note can hold text, images or a voice note — pick two".into(),
                             ));
                         }
                         // Same-id re-embed is a no-op; otherwise the current
                         // recording (if any) returns to the feed and the
                         // target one is moved in.
-                        if item.recording.as_ref().map(|r| r.id.as_str()) != Some(rec_id.as_str())
-                        {
+                        if item.recording.as_ref().map(|r| r.id.as_str()) != Some(rec_id.as_str()) {
                             if let Some(rec) = item.recording.take() {
                                 returned_recordings.push(rec);
                             }
@@ -887,6 +886,112 @@ impl Store {
         }
         self.persist_workspace(ws_id);
         Ok(item)
+    }
+
+    /// Merge several text notes into their oldest one, atomically. Text is
+    /// concatenated oldest-first; images move to the target (metadata-only —
+    /// files stay in place within the workspace); voice notes embedded in the
+    /// sources are released to the workspace feed as standalone voice notes.
+    /// Audio files never move and nothing is parked or trashed, so a plain
+    /// undo of the returned snapshots fully reverses the merge. Fails when
+    /// the merged note would hold text, images and a voice note at once.
+    pub fn merge_items(&mut self, ws_id: &str, source_ids: &[String]) -> AppResult<MergeOutcome> {
+        let now = now_ms();
+        // Defensive dedupe; the frontend sends distinct ids.
+        let mut ids: Vec<String> = Vec::with_capacity(source_ids.len());
+        for id in source_ids {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        let (updated_target, removed, released) = {
+            let data = self.workspace_data_mut(ws_id)?;
+            let known = |id: &str| data.items.iter().find(|i| i.id == id);
+            // Oldest selected note is the merge target so its position in
+            // the feed holds.
+            let mut target_id: Option<String> = None;
+            let mut target_created = i64::MAX;
+            for id in &ids {
+                match known(id) {
+                    Some(item) if item.created_at < target_created => {
+                        target_created = item.created_at;
+                        target_id = Some(id.clone());
+                    }
+                    Some(_) => {}
+                    None => return Err(AppError::ItemNotFound),
+                }
+            }
+            let target_id = target_id.ok_or(AppError::Invalid("no notes to merge".into()))?;
+            // Sources oldest-first (their text is appended after the
+            // target's), excluding the target itself.
+            let mut sources: Vec<Item> = ids
+                .iter()
+                .filter(|id| id.as_str() != target_id)
+                .map(|id| known(id).cloned().ok_or(AppError::ItemNotFound))
+                .collect::<Result<_, _>>()?;
+            sources.sort_by_key(|s| s.created_at);
+            if sources.is_empty() {
+                return Err(AppError::Invalid("merge needs at least two notes".into()));
+            }
+            let (merged_text, images, has_voice) = {
+                let target = known(&target_id).ok_or(AppError::ItemNotFound)?;
+                let mut parts: Vec<String> = Vec::new();
+                if !target.content.trim().is_empty() {
+                    parts.push(target.content.trim().to_string());
+                }
+                for source in &sources {
+                    if !source.content.trim().is_empty() {
+                        parts.push(source.content.trim().to_string());
+                    }
+                }
+                // Union of every note's images: the target's own order
+                // first, then the sources oldest-first. Metadata-only move —
+                // image files stay at their paths.
+                let mut images = target.images.clone();
+                for source in &sources {
+                    images.extend(source.images.iter().cloned());
+                }
+                let has_voice =
+                    target.recording.is_some() || sources.iter().any(|s| s.recording.is_some());
+                (parts.join("\n\n"), images, has_voice)
+            };
+            if !merged_text.is_empty() && !images.is_empty() && has_voice {
+                return Err(AppError::Invalid(
+                    "merging would combine text, images and a voice note in one note".into(),
+                ));
+            }
+            // Voice notes embedded in the sources return to the workspace
+            // feed as standalone voice notes (metadata move only).
+            let released: Vec<Recording> =
+                sources.iter().filter_map(|s| s.recording.clone()).collect();
+            let target_pos = data
+                .items
+                .iter()
+                .position(|i| i.id == target_id)
+                .ok_or(AppError::ItemNotFound)?;
+            let updated_target = {
+                let target = &mut data.items[target_pos];
+                target.content = merged_text;
+                target.images = images;
+                target.updated_at = now;
+                target.clone()
+            };
+            // Drop every selected source note; the target (also selected)
+            // stays.
+            data.items
+                .retain(|i| i.id == target_id || !ids.contains(&i.id));
+            (updated_target, sources, released)
+        };
+        if !released.is_empty() {
+            let data = self.workspace_data_mut(ws_id)?;
+            data.recordings.extend(released.iter().cloned());
+        }
+        self.persist_workspace(ws_id);
+        Ok(MergeOutcome {
+            target: updated_target,
+            removed,
+            released,
+        })
     }
 
     /// Park a deleted image file for Ctrl+Z. Missing files are fine: the
@@ -923,22 +1028,22 @@ impl Store {
             let source = self.image_path(from_ws, &image.file);
             let destination = self.image_path(to_ws, &image.file);
             if source.is_file() && !destination.is_file() {
-                fs::create_dir_all(self.images_dir(to_ws))
-                    .map_err(|e| AppError::Storage(format!("cannot create images directory: {e}")))?;
-                fs::copy(&source, &destination).map_err(|e| {
-                    AppError::Storage(format!("could not copy image file: {e}"))
+                fs::create_dir_all(self.images_dir(to_ws)).map_err(|e| {
+                    AppError::Storage(format!("cannot create images directory: {e}"))
                 })?;
+                fs::copy(&source, &destination)
+                    .map_err(|e| AppError::Storage(format!("could not copy image file: {e}")))?;
             }
         }
         if let Some(rec) = &item.recording {
             let source = self.recording_path(from_ws, &rec.file);
             let destination = self.recording_path(to_ws, &rec.file);
             if source.is_file() && !destination.is_file() {
-                fs::create_dir_all(self.voices_dir(to_ws))
-                    .map_err(|e| AppError::Storage(format!("cannot create voices directory: {e}")))?;
-                fs::copy(&source, &destination).map_err(|e| {
-                    AppError::Storage(format!("could not copy voice file: {e}"))
+                fs::create_dir_all(self.voices_dir(to_ws)).map_err(|e| {
+                    AppError::Storage(format!("cannot create voices directory: {e}"))
                 })?;
+                fs::copy(&source, &destination)
+                    .map_err(|e| AppError::Storage(format!("could not copy voice file: {e}")))?;
             }
         }
         let data = self.workspace_data_mut(to_ws)?;
@@ -955,8 +1060,7 @@ impl Store {
                 return Err(AppError::ItemNotFound);
             };
             let item = data.items.remove(pos);
-            let parked_images: Vec<String> =
-                item.images.iter().map(|i| i.file.clone()).collect();
+            let parked_images: Vec<String> = item.images.iter().map(|i| i.file.clone()).collect();
             (parked_images, item.recording)
         };
         for file in parked_images {
@@ -1156,8 +1260,7 @@ impl Store {
         // restore the recording (the trash is wiped on next startup).
         let source = self.recording_path(ws_id, &file);
         let trash_path = self.trash_dir().join(&file);
-        let parked = match fs::create_dir_all(&trash_path.parent().unwrap_or(&self.trash_dir()))
-        {
+        let parked = match fs::create_dir_all(&trash_path.parent().unwrap_or(&self.trash_dir())) {
             Ok(()) => fs::rename(&source, &trash_path),
             Err(e) => Err(e),
         };
@@ -1181,7 +1284,12 @@ impl Store {
     /// Persist an uploaded image into the workspace images directory and
     /// return its metadata row. The caller attaches the row to an item when
     /// the note is created (or updated).
-    pub fn save_image(&mut self, ws_id: &str, ext: &str, data_bytes: &[u8]) -> AppResult<ItemImage> {
+    pub fn save_image(
+        &mut self,
+        ws_id: &str,
+        ext: &str,
+        data_bytes: &[u8],
+    ) -> AppResult<ItemImage> {
         if data_bytes.is_empty() {
             return Err(AppError::Invalid("empty image".into()));
         }
@@ -1189,7 +1297,10 @@ impl Store {
             return Err(AppError::Invalid("image too large".into()));
         }
         let ext = ext.to_ascii_lowercase();
-        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif") {
+        if !matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif"
+        ) {
             return Err(AppError::Invalid("unsupported image format".into()));
         }
         let id = Uuid::new_v4().to_string();
@@ -1228,9 +1339,8 @@ impl Store {
             let final_path = self.image_path(ws_id, &image.file);
             if parked.is_file() && !final_path.is_file() {
                 fs::create_dir_all(self.images_dir(ws_id))?;
-                fs::rename(&parked, &final_path).map_err(|e| {
-                    AppError::Storage(format!("could not restore image file: {e}"))
-                })?;
+                fs::rename(&parked, &final_path)
+                    .map_err(|e| AppError::Storage(format!("could not restore image file: {e}")))?;
             }
         }
         // A deleted image+voice note parks its embedded audio too.
@@ -1239,9 +1349,8 @@ impl Store {
             let final_path = self.recording_path(ws_id, &rec.file);
             if parked.is_file() && !final_path.is_file() {
                 fs::create_dir_all(self.voices_dir(ws_id))?;
-                fs::rename(&parked, &final_path).map_err(|e| {
-                    AppError::Storage(format!("could not restore voice file: {e}"))
-                })?;
+                fs::rename(&parked, &final_path)
+                    .map_err(|e| AppError::Storage(format!("could not restore voice file: {e}")))?;
             }
         }
         let data = self.workspace_data_mut(ws_id)?;
@@ -1260,9 +1369,8 @@ impl Store {
         let final_path = self.recording_path(ws_id, &recording.file);
         if parked.is_file() {
             fs::create_dir_all(self.voices_dir(ws_id))?;
-            fs::rename(&parked, &final_path).map_err(|e| {
-                AppError::Storage(format!("could not restore voice file: {e}"))
-            })?;
+            fs::rename(&parked, &final_path)
+                .map_err(|e| AppError::Storage(format!("could not restore voice file: {e}")))?;
         } else if !final_path.is_file() {
             return Err(AppError::Storage(
                 "voice audio is no longer available".into(),
@@ -1409,9 +1517,7 @@ fn validate_backup<R: Read + Seek>(
                         "backup contains an invalid or duplicate image id".into(),
                     ));
                 }
-                if !fsutil::valid_file_name(&image.file)
-                    || !has_image_extension(&image.file)
-                {
+                if !fsutil::valid_file_name(&image.file) || !has_image_extension(&image.file) {
                     return Err(AppError::Invalid(
                         "backup contains an invalid image file name".into(),
                     ));
@@ -1903,7 +2009,8 @@ mod tests {
         assert_eq!(summary.audio_files, 1);
         assert_eq!(summary.missing_audio, 0);
 
-        let import_dir = std::env::temp_dir().join(format!("pocket-import-test-{}", Uuid::new_v4()));
+        let import_dir =
+            std::env::temp_dir().join(format!("pocket-import-test-{}", Uuid::new_v4()));
         let mut imported_store = Store::load(import_dir.clone(), false);
         imported_store.settings.theme = "dark".into();
         let imported = imported_store.import_backup_archive(&destination).unwrap();
@@ -1955,7 +2062,11 @@ mod tests {
             .unwrap();
         // The recording moved out of the feed into the note (not copied).
         assert_eq!(item.recording.as_ref().unwrap().id, rec.id);
-        assert!(store.workspace_data(&ws.meta.id).unwrap().recordings.is_empty());
+        assert!(store
+            .workspace_data(&ws.meta.id)
+            .unwrap()
+            .recordings
+            .is_empty());
         assert!(store.recording_path(&ws.meta.id, &rec.file).exists());
 
         // Detaching puts it back into the feed.
@@ -1970,7 +2081,10 @@ mod tests {
             )
             .unwrap();
         assert!(updated.recording.is_none());
-        assert_eq!(store.workspace_data(&ws.meta.id).unwrap().recordings.len(), 1);
+        assert_eq!(
+            store.workspace_data(&ws.meta.id).unwrap().recordings.len(),
+            1
+        );
         assert!(store.recording_path(&ws.meta.id, &rec.file).exists());
         cleanup(&dir);
     }
@@ -2008,9 +2122,7 @@ mod tests {
         let (mut store, dir) = test_store();
         let from = store.create_workspace("From").unwrap();
         let to = store.create_workspace("To").unwrap();
-        let image = store
-            .save_image(&from.meta.id, "png", b"fakepng")
-            .unwrap();
+        let image = store.save_image(&from.meta.id, "png", b"fakepng").unwrap();
         let rec = store
             .save_recording(&from.meta.id, "temp", 800, b"voicebytes")
             .unwrap();
@@ -2036,8 +2148,303 @@ mod tests {
         assert!(store
             .image_path(&to.meta.id, &moved.images[0].file)
             .exists());
-        assert!(store.recording_path(&to.meta.id, &moved.recording.unwrap().file).exists());
-        assert!(store.workspace_data(&from.meta.id).unwrap().items.is_empty());
+        assert!(store
+            .recording_path(&to.meta.id, &moved.recording.unwrap().file)
+            .exists());
+        assert!(store
+            .workspace_data(&from.meta.id)
+            .unwrap()
+            .items
+            .is_empty());
+        cleanup(&dir);
+    }
+
+    fn merge_new_item(content: &str) -> NewItem {
+        NewItem {
+            item_type: ItemType::Text,
+            content: content.into(),
+            title: None,
+            url: None,
+            images: Vec::new(),
+            recording_id: None,
+        }
+    }
+
+    #[test]
+    fn merge_concatenates_text_and_keeps_only_the_target() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let a = store.create_item(&id, merge_new_item("first")).unwrap();
+        let b = store.create_item(&id, merge_new_item("second")).unwrap();
+        let c = store.create_item(&id, merge_new_item("third")).unwrap();
+
+        let outcome = store
+            .merge_items(&id, &[c.id.clone(), a.id.clone(), b.id.clone()])
+            .unwrap();
+        assert_eq!(outcome.target.id, a.id);
+        assert_eq!(outcome.target.content, "first\n\nsecond\n\nthird");
+        assert_eq!(outcome.removed.len(), 2);
+        assert!(outcome.released.is_empty());
+
+        let data = store.workspace_data(&id).unwrap();
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].id, a.id);
+        assert_eq!(data.items[0].content, "first\n\nsecond\n\nthird");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_moves_images_without_touching_files_or_releasing_voice() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let img1 = store.save_image(&id, "png", b"one").unwrap();
+        let img2 = store.save_image(&id, "png", b"two").unwrap();
+        let a = store
+            .create_item(
+                &id,
+                NewItem {
+                    images: vec![img1.clone()],
+                    ..merge_new_item("with image")
+                },
+            )
+            .unwrap();
+        let b = store
+            .create_item(
+                &id,
+                NewItem {
+                    images: vec![img2.clone()],
+                    ..merge_new_item("also image")
+                },
+            )
+            .unwrap();
+
+        let outcome = store
+            .merge_items(&id, &[a.id.clone(), b.id.clone()])
+            .unwrap();
+        // Both images now live on the surviving target, deduplicated and in
+        // insertion order (a's first).
+        assert_eq!(outcome.target.images.len(), 2);
+        assert_eq!(outcome.target.images[0].id, img1.id);
+        assert_eq!(outcome.target.images[1].id, img2.id);
+        // Files never moved.
+        assert!(store.image_path(&id, &img1.file).exists());
+        assert!(store.image_path(&id, &img2.file).exists());
+        // Nothing was parked for undo: the trash holds nothing relevant.
+        let data = store.workspace_data(&id).unwrap();
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].images.len(), 2);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_releases_source_voice_notes_to_the_feed_losslessly() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let rec_a = store.save_recording(&id, "a", 800, b"voice-a").unwrap();
+        let rec_b = store.save_recording(&id, "b", 800, b"voice-b").unwrap();
+        let a = store
+            .create_item(
+                &id,
+                NewItem {
+                    recording_id: Some(rec_a.id.clone()),
+                    ..merge_new_item("a")
+                },
+            )
+            .unwrap();
+        let b = store
+            .create_item(
+                &id,
+                NewItem {
+                    recording_id: Some(rec_b.id.clone()),
+                    ..merge_new_item("b")
+                },
+            )
+            .unwrap();
+
+        let outcome = store
+            .merge_items(&id, &[a.id.clone(), b.id.clone()])
+            .unwrap();
+        assert_eq!(outcome.removed.len(), 1);
+        assert_eq!(outcome.released.len(), 1);
+        // The merged note keeps the target's voice embedded...
+        assert_eq!(outcome.target.recording.as_ref().unwrap().id, rec_a.id);
+        // ...and the source's voice is standalone in the feed again.
+        let data = store.workspace_data(&id).unwrap();
+        assert_eq!(data.recordings.len(), 1);
+        assert_eq!(data.recordings[0].id, rec_b.id);
+        // The audio file never moved or was trashed.
+        assert!(store.recording_path(&id, &rec_b.file).exists());
+        assert!(store.recording_path(&id, &rec_a.file).exists());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_rejects_a_text_image_voice_triple() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let img = store.save_image(&id, "png", b"px").unwrap();
+        let rec = store
+            .save_recording(&id, "temp", 800, b"voicebytes")
+            .unwrap();
+        let a = store.create_item(&id, merge_new_item("text")).unwrap();
+        let b = store
+            .create_item(
+                &id,
+                NewItem {
+                    images: vec![img],
+                    ..merge_new_item("more text")
+                },
+            )
+            .unwrap();
+        let _ = store
+            .create_item(
+                &id,
+                NewItem {
+                    recording_id: Some(rec.id.clone()),
+                    ..merge_new_item("voiced")
+                },
+            )
+            .unwrap();
+
+        // Merging all three would create text + images + voice in one note.
+        let all: Vec<String> = store
+            .workspace_data(&id)
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.id.clone())
+            .collect();
+        assert!(store.merge_items(&id, &all).is_err());
+        // Nothing changed after the failed merge.
+        assert_eq!(store.workspace_data(&id).unwrap().items.len(), 3);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_undo_snapshots_restore_the_original_feed() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let rec = store
+            .save_recording(&id, "temp", 800, b"voicebytes")
+            .unwrap();
+        let a = store.create_item(&id, merge_new_item("alpha")).unwrap();
+        // A text note carrying an embedded voice (created the way the UI
+        // does: capture text, then attach the recording).
+        let b = store.create_item(&id, merge_new_item("gamma")).unwrap();
+        store
+            .update_item(
+                &id,
+                &b.id,
+                ItemPatch {
+                    recording_id: Some(Some(rec.id.clone())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let before = store.workspace_data(&id).unwrap().clone();
+        assert_eq!(before.recordings.len(), 0); // b's voice is embedded
+
+        let outcome = store
+            .merge_items(&id, &[a.id.clone(), b.id.clone()])
+            .unwrap();
+        assert_eq!(outcome.released.len(), 1);
+        // Apply the frontend's undo steps in order, like apply_undo does:
+        // pull the released voice out of the feed (its file is parked, then
+        // immediately unparked by the next step), restore the removed source
+        // note whose snapshot still carries the embedded voice, then restore
+        // the target's previous shape.
+        store
+            .delete_recording(&id, &outcome.released[0].id)
+            .unwrap();
+        for item in &outcome.removed {
+            store.restore_item(&id, item.clone()).unwrap();
+        }
+        store
+            .restore_item(
+                &id,
+                before.items.iter().find(|i| i.id == a.id).unwrap().clone(),
+            )
+            .unwrap();
+
+        let after = store.workspace_data(&id).unwrap().clone();
+        assert_eq!(after.items.len(), before.items.len());
+        assert_eq!(after.recordings.len(), before.recordings.len());
+        for (prev, now) in before.items.iter().zip(after.items.iter()) {
+            assert_eq!(prev.id, now.id);
+            assert_eq!(prev.content, now.content);
+            assert_eq!(prev.images.len(), now.images.len());
+            assert_eq!(
+                prev.recording.as_ref().map(|r| r.id.clone()),
+                now.recording.as_ref().map(|r| r.id.clone())
+            );
+        }
+        // The voice file was never trashed, so audio still plays.
+        assert!(store.recording_path(&id, &rec.file).exists());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_with_images_undoes_to_the_original_feed() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let img = store.save_image(&id, "png", b"px").unwrap();
+        let a = store.create_item(&id, merge_new_item("alpha")).unwrap();
+        // An image-only note.
+        let b = store
+            .create_item(
+                &id,
+                NewItem {
+                    images: vec![img.clone()],
+                    ..merge_new_item("")
+                },
+            )
+            .unwrap();
+        let before = store.workspace_data(&id).unwrap().clone();
+
+        let outcome = store
+            .merge_items(&id, &[a.id.clone(), b.id.clone()])
+            .unwrap();
+        assert_eq!(outcome.target.images.len(), 1);
+        for item in &outcome.removed {
+            store.restore_item(&id, item.clone()).unwrap();
+        }
+        store
+            .restore_item(
+                &id,
+                before.items.iter().find(|i| i.id == a.id).unwrap().clone(),
+            )
+            .unwrap();
+
+        let after = store.workspace_data(&id).unwrap().clone();
+        assert_eq!(after.items.len(), before.items.len());
+        for (prev, now) in before.items.iter().zip(after.items.iter()) {
+            assert_eq!(prev.images.len(), now.images.len());
+        }
+        assert!(store.image_path(&id, &img.file).exists());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn merge_dedupes_ids_and_ignores_unknown_ones_by_failing_cleanly() {
+        let (mut store, dir) = test_store();
+        let ws = store.create_workspace("WS").unwrap();
+        let id = ws.meta.id.clone();
+        let a = store.create_item(&id, merge_new_item("only")).unwrap();
+        // A single (duplicated) id cannot merge.
+        assert!(store
+            .merge_items(&id, &[a.id.clone(), a.id.clone()])
+            .is_err());
+        // An unknown id is a hard error; nothing is mutated.
+        assert!(store
+            .merge_items(&id, &[a.id.clone(), "ghost".into()])
+            .is_err());
+        assert_eq!(store.workspace_data(&id).unwrap().items.len(), 1);
         cleanup(&dir);
     }
 }

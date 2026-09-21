@@ -140,6 +140,7 @@ pub fn run() {
             commands::get_workspace_counts,
             commands::set_active_workspace,
             commands::create_item,
+            commands::merge_items,
             commands::update_item,
             commands::delete_item,
             commands::move_item,

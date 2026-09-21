@@ -8,6 +8,7 @@ import type {
   Item,
   ItemImage,
   ItemType,
+  MergeOutcome,
   Recording,
   SearchHit,
   Settings,
@@ -70,6 +71,11 @@ export const api = {
     itemIds: string[],
     recordingIds: string[]
   ) => invoke<number>("delete_entries_bulk", { workspaceId, itemIds, recordingIds }),
+  /** Merge several notes into their oldest one, atomically. Text
+      concatenates, images move, embedded voices are released to the feed.
+      Media files are never parked or trashed, so undo is metadata-only. */
+  mergeItems: (workspaceId: string, sourceIds: string[]) =>
+    invoke<MergeOutcome>("merge_items", { workspaceId, sourceIds }),
 
   setPinned: (
     workspaceId: string,

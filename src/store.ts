@@ -150,6 +150,10 @@ interface PocketStore {
   ) => Promise<Item | null>;
   updateItem: (itemId: string, patch: Partial<Item>) => Promise<void>;
   deleteItem: (itemId: string) => Promise<void>;
+  /** Merge several notes into their oldest one (atomic backend op).
+      Returns false when the merge was rejected (e.g. it would combine
+      text, images and a voice note in one note). */
+  mergeItems: (sourceIds: string[]) => Promise<boolean>;
   /** Toggle the todo-style done state (backed by the legacy `pinned`
       flag, which is no longer used for pinning). Works for both text
       items and voice recordings. */
@@ -351,6 +355,37 @@ export const usePocket = create<PocketStore>((set, get) => ({
       }
     } catch (e) {
       void api.log(`deleteItem FAILED: ${errMessage(e)}`);
+    }
+  },
+
+  mergeItems: async (sourceIds) => {
+    const wsId = get().settings?.activeWorkspaceId;
+    if (!wsId) return false;
+    try {
+      const outcome = await api.mergeItems(wsId, sourceIds);
+      // One undo action, in apply_undo's reverse-merge order: pull each
+      // released voice out of the feed, re-create each folded source note
+      // (its snapshot still embeds the voice), then restore the target's
+      // previous shape. No media files were parked or trashed, so this is
+      // metadata-only and lossless.
+      get().recordUndo([
+        ...outcome.released.map(
+          (r) =>
+            ({ type: "removeRecording", workspaceId: wsId, recordingId: r.id }) as UndoStep
+        ),
+        ...outcome.removed.map(
+          (item) => ({ type: "restoreItem", workspaceId: wsId, item }) as UndoStep
+        ),
+        {
+          type: "restoreItem",
+          workspaceId: wsId,
+          item: get().data?.items.find((i) => i.id === outcome.target.id) ?? outcome.target,
+        },
+      ]);
+      return true;
+    } catch (e) {
+      void api.log(`mergeItems FAILED: ${errMessage(e)}`);
+      return false;
     }
   },
 

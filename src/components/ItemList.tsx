@@ -103,8 +103,7 @@ export function ItemList() {
   const data = usePocket((s) => s.data);
   const focusItemId = usePocket((s) => s.focusItemId);
   const setEntryDone = usePocket((s) => s.setEntryDone);
-  const updateItem = usePocket((s) => s.updateItem);
-  const deleteItem = usePocket((s) => s.deleteItem);
+  const mergeItems = usePocket((s) => s.mergeItems);
   const recordUndo = usePocket((s) => s.recordUndo);
   const undo = usePocket((s) => s.undo);
   const wsId = usePocket((s) => s.settings?.activeWorkspaceId ?? "");
@@ -221,35 +220,30 @@ export function ItemList() {
   }, []);
 
   const mergeSelected = useCallback(() => {
-    if (selectedTextIds.length < 2) return;
-    const selected = entries.filter(
-      (e): e is { key: string; kind: "text"; item: Item } =>
-        e.kind === "text" && selectedIds.has(e.key)
-    );
-    // Oldest note is the merge target so its position in the feed holds.
-    const ordered = [...selected].sort((a, b) => a.item.createdAt - b.item.createdAt);
-    const merged = ordered.map((e) => e.item.content.trim()).join("\n\n");
-    const undoSteps: UndoStep[] = ordered
-      .slice(1)
-      .map((e) => ({ type: "restoreItem", workspaceId: wsId, item: e.item }) as UndoStep);
-    const prevTarget = ordered[0].item;
-    void updateItem(ordered[0].item.id, { content: merged }).then(() => {
-      // updateItem records its own "restore previous" step; re-record the
-      // whole merge as one action so Ctrl+Z reverts everything at once.
-      usePocket.setState((s) => ({
-        undoHistory: [
-          ...s.undoHistory.slice(0, -1),
-          [
-            { type: "restoreItem", workspaceId: wsId, item: prevTarget } as UndoStep,
-            ...undoSteps,
-          ],
-        ],
-      }));
+    // One atomic backend operation: text folds into the oldest note, images
+    // move to it, and any embedded voice notes are released to the feed —
+    // media files are never parked or trashed, so Ctrl+Z is lossless.
+    // Standalone voice notes in the selection are left untouched.
+    const noteIds = entries
+      .filter(
+        (e): e is { key: string; kind: "text"; item: Item } =>
+          e.kind === "text" && selectedIds.has(e.key)
+      )
+      .map((e) => e.item.id);
+    if (noteIds.length < 2) return;
+    void mergeItems(noteIds).then((ok) => {
+      if (!ok) {
+        toast.add({
+          title: "Merge Not Possible",
+          description: "Merging would combine text, images and a voice note in one note.",
+          type: "error",
+        });
+        return;
+      }
+      toast.add({ title: "Notes Merged", type: "success" });
     });
-    for (const e of ordered.slice(1)) void deleteItem(e.item.id);
-    toast.add({ title: "Notes Merged", type: "success" });
     setSelectedIds(new Set());
-  }, [entries, selectedIds, selectedTextIds, updateItem, deleteItem, recordUndo, wsId]);
+  }, [entries, selectedIds, mergeItems]);
 
   const deleteSelected = useCallback(() => {
     if (selectedIds.size === 0) return;
