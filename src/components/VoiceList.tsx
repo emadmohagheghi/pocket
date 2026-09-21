@@ -339,26 +339,22 @@ export function VoicePlayerEngine() {
     seekInFlightRef.current > 0 ||
     (audioRef.current?.seeking ?? false);
 
-  /** Applies a pending seek request. When the element has no metadata yet,
-      assigning currentTime only queues a default start position — we keep
-      the request alive so onLoadedMetadata re-applies it precisely. */
+  /** Applies a pending seek request. MediaRecorder-produced webm carries no
+      duration header: `el.duration` stays NaN for seconds after start even
+      at readyState 4. Gating seeks on a finite duration deferred every scrub
+      through that window and then coalesced them into one stale backward
+      jump ("goes back to the start"). Metadata (readyState >= 1) is enough:
+      seek immediately; clamp only when the duration is actually known. */
   const applySeek = (el: HTMLAudioElement, seconds: number) => {
     const clamped = Math.max(0, seconds);
-    const d = el.duration;
-    const ready = Number.isFinite(d) && d > 0;
-    if (!ready) {
-      // Metadata not here yet: remember the target, try a best-effort set
-      // (harmless if queued), and leave the request pending for the
-      // onLoadedMetadata handler.
+    if (el.readyState < 1) {
+      // No metadata yet: remember the target for onLoadedMetadata, which is
+      // the earliest moment a currentTime write is defined at all.
       lastSeekTargetRef.current = clamped;
-      try {
-        el.currentTime = clamped;
-      } catch {
-        /* no metadata at all — the metadata handler will apply it */
-      }
       return;
     }
-    const target = Math.min(clamped, d);
+    const d = el.duration;
+    const target = Number.isFinite(d) && d > 0 ? Math.min(clamped, d) : clamped;
     lastSeekTargetRef.current = target;
     seekInFlightRef.current += 1;
     el.currentTime = target;
@@ -419,17 +415,20 @@ export function VoicePlayerEngine() {
           applySeek(e.currentTarget, pending);
           return;
         }
-        // A queued best-effort pre-metadata seek re-applies exactly here.
+        // A queued pre-metadata seek target re-applies exactly here — but
+        // only before the element starts moving on its own. If the element
+        // has already advanced past 0 by the time metadata arrives, a late
+        // re-apply would yank it backwards ("jumped to the start").
         const target = lastSeekTargetRef.current;
-        if (target != null) {
-          lastSeekTargetRef.current = null;
-          seekInFlightRef.current += 1;
-          e.currentTarget.currentTime = Math.min(
-            target,
-            e.currentTarget.duration
-          );
+        if (
+          target != null &&
+          e.currentTarget.currentTime < 0.1 &&
+          e.currentTarget.paused
+        ) {
+          applySeek(e.currentTarget, target);
           return;
         }
+        lastSeekTargetRef.current = null;
         reportLive(e.currentTarget, !e.currentTarget.paused);
       }}
       onPlay={(e) => {

@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::http::header::{
-    ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE,
+    ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
+    CONTENT_TYPE, ETAG, RANGE,
 };
 use tauri::{Manager, Runtime, UriSchemeContext};
 use tauri_plugin_autostart::MacosLauncher;
@@ -28,8 +29,7 @@ pub fn run() {
     // A relaunch carrying the post-update marker comes from the self-update
     // installer/watcher: its window must ALWAYS end up visible (the user just
     // clicked "update"), even with start-minimized enabled.
-    let post_update_launch = std::env::args()
-        .any(|arg| arg == updater::POST_UPDATE_LAUNCH_MARKER);
+    let post_update_launch = std::env::args().any(|arg| arg == updater::POST_UPDATE_LAUNCH_MARKER);
     // Load the store BEFORE the builder starts creating windows: config
     // windows are built before setup() runs, and a fast webview (warm dev
     // server or cached assets) can invoke commands before setup finishes —
@@ -355,7 +355,13 @@ fn image_protocol<R: Runtime>(
     let full_path = store.image_path(ws_id, file);
     drop(store);
 
-    let content_type = match file.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    let content_type = match file
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -388,9 +394,53 @@ fn has_image_ext(file: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
+/// Parses a `Range` header value of the `bytes` unit. Returns the resolved
+/// (start, end) pair, end INCLUSIVE, or `None` when absent/malformed. A
+/// syntactically valid range that lies entirely past the end is NOT `None` —
+/// it resolves to an error response at the caller (that distinction needs
+/// the file length, which the parser does not have).
+fn parse_byte_range(value: &str, len: u64) -> Option<(u64, u64)> {
+    let value = value.trim();
+    // A single range only; multipart ranges are never emitted by media
+    // elements and are rejected as malformed.
+    let spec = value.strip_prefix("bytes=")?.split(',').next()?;
+    let spec = spec.trim();
+    if let Some((first, last)) = spec.split_once('-') {
+        let first = first.trim();
+        let last = last.trim();
+        if first.is_empty() {
+            // Suffix form `-N`: the final N bytes.
+            let n: u64 = last.parse().ok()?;
+            if n == 0 || len == 0 {
+                return None;
+            }
+            let start = len.saturating_sub(n);
+            return Some((start, len - 1));
+        }
+        let start: u64 = first.parse().ok()?;
+        let end = if last.is_empty() {
+            len - 1
+        } else {
+            last.parse::<u64>().ok()?.min(len - 1)
+        };
+        if start > end {
+            return None;
+        }
+        return Some((start, end));
+    }
+    None
+}
+
 /// Serves voice recordings from `data_dir/voices/<workspace>/<file>.webm`
 /// over the `voice://` scheme. Only strict, internally-generated paths are
 /// accepted, so nothing outside the voices directory can be read.
+///
+/// HTTP range requests (`Range: bytes=…` → `206 Partial Content`) are
+/// supported, because the media pipeline seeks by re-requesting a byte
+/// window. A plain full-body 200 (no `Accept-Ranges`) forces every backward
+/// seek to restart the resource from byte 0, and rapid back-and-forth
+/// scrubbing then desyncs the pipeline — heard as playback snapping back to
+/// the start of the recording.
 fn voice_protocol<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: tauri::http::Request<Vec<u8>>,
@@ -420,7 +470,7 @@ fn voice_protocol<R: Runtime>(
     // Defense in depth: the recording must exist in workspace metadata —
     // either standalone in the feed or embedded in a note (image+voice
     // notes carry their recording on the item, not in the feed).
-    let known = store.workspace_data(ws_id).map_or(false, |d| {
+    let known = store.workspace_data(ws_id).is_ok_and(|d| {
         d.recordings.iter().any(|r| r.file == file)
             || d.items
                 .iter()
@@ -432,18 +482,116 @@ fn voice_protocol<R: Runtime>(
     let full_path = store.recording_path(ws_id, file);
     drop(store);
 
-    match std::fs::read(&full_path) {
-        Ok(bytes) => {
-            let len = bytes.len();
-            tauri::http::Response::builder()
-                .status(200)
-                .header(CONTENT_TYPE, "audio/webm")
-                .header(CONTENT_LENGTH, len.to_string())
-                .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(CACHE_CONTROL, "no-store")
-                .body(Cow::Owned(bytes))
-                .unwrap()
+    let file = match std::fs::File::open(&full_path) {
+        Ok(f) => f,
+        Err(_) => return not_found("not found"),
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return not_found("not found"),
+    };
+    // Weak validator keyed on size: lets the media cache treat a re-request
+    // (e.g. a seek re-fetch) as the same resource it already holds.
+    let etag = format!("W:\"voice-{len}\"");
+
+    let base = tauri::http::Response::builder()
+        .header(CONTENT_TYPE, "audio/webm")
+        .header(ACCEPT_RANGES, "bytes")
+        .header(ETAG, etag)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(CACHE_CONTROL, "no-store");
+
+    let range = request
+        .headers()
+        .get(RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_byte_range(v, len));
+
+    let (status, start, end) = match range {
+        // Range entirely past the end → not satisfiable. `Content-Range:
+        // bytes */len` tells the client the real size.
+        None if request.headers().get(RANGE).is_some() => {
+            return base
+                .status(416)
+                .header(CONTENT_RANGE, format!("bytes */{len}"))
+                .body(Cow::Borrowed(&b""[..]))
+                .unwrap();
         }
-        Err(_) => not_found("not found"),
+        None => (200u16, 0u64, len.saturating_sub(1)),
+        Some((s, e)) => (206u16, s, e),
+    };
+
+    let chunk = end - start + 1;
+    use std::io::{Read, Seek, SeekFrom};
+    let mut reader = file;
+    if start > 0 && reader.seek(SeekFrom::Start(start)).is_err() {
+        return not_found("not found");
+    }
+    let mut bytes = Vec::with_capacity(chunk as usize);
+    if reader.take(chunk).read_to_end(&mut bytes).is_err() {
+        return not_found("not found");
+    }
+
+    let mut builder = base
+        .status(status)
+        .header(CONTENT_LENGTH, chunk.to_string());
+    if status == 206 {
+        builder = builder.header(CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
+    }
+    builder.body(Cow::Owned(bytes)).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_byte_range;
+
+    const LEN: u64 = 1000;
+
+    #[test]
+    fn absent_range_is_none() {
+        assert_eq!(parse_byte_range("", LEN), None);
+    }
+
+    #[test]
+    fn full_open_ended_range_spans_the_file() {
+        assert_eq!(parse_byte_range("bytes=0-", LEN), Some((0, 999)));
+    }
+
+    #[test]
+    fn closed_range_resolves_inclusively() {
+        assert_eq!(parse_byte_range("bytes=100-199", LEN), Some((100, 199)));
+    }
+
+    #[test]
+    fn end_is_clamped_to_the_last_byte() {
+        assert_eq!(parse_byte_range("bytes=990-2000", LEN), Some((990, 999)));
+    }
+
+    #[test]
+    fn suffix_range_takes_the_file_tail() {
+        assert_eq!(parse_byte_range("bytes=-100", LEN), Some((900, 999)));
+        // A suffix longer than the file is the whole file.
+        assert_eq!(parse_byte_range("bytes=-5000", LEN), Some((0, 999)));
+    }
+
+    #[test]
+    fn zero_length_suffix_is_unsatisfiable() {
+        assert_eq!(parse_byte_range("bytes=-0", LEN), None);
+    }
+
+    #[test]
+    fn range_starting_at_or_past_the_end_is_unsatisfiable() {
+        // Per RFC 9110 a range whose first byte position is >= the
+        // representation length is unsatisfiable; the protocol handler maps
+        // an unresolvable Range header to 416 rather than a full 200.
+        assert_eq!(parse_byte_range("bytes=1000-", LEN), None);
+        assert_eq!(parse_byte_range("bytes=2000-", LEN), None);
+    }
+
+    #[test]
+    fn malformed_ranges_are_none() {
+        assert_eq!(parse_byte_range("bytes=abc-", LEN), None);
+        assert_eq!(parse_byte_range("bytes=-abc", LEN), None);
+        assert_eq!(parse_byte_range("items=0-", LEN), None);
     }
 }
