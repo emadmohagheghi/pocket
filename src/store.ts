@@ -51,9 +51,22 @@ export type UndoStep =
 
 const UNDO_HISTORY_LIMIT = 10;
 
+/** The voice engine's <audio> element, registered by VoicePlayerEngine on
+    mount. Deliberately kept out of the store state: elements are not
+    serializable and never need to trigger re-renders. Lets store logic
+    (e.g. togglePlayer's end-of-track heuristic) reach the real element
+    without fragile DOM queries. */
+const audioEngineElement: { current: HTMLAudioElement | null } = {
+  current: null,
+};
+
+export function registerAudioEngineElement(el: HTMLAudioElement | null) {
+  audioEngineElement.current = el;
+}
+
 /** Stop shared playback when its track no longer exists: the recording was
-    deleted (directly, bulk-deleted, or inside a deleted note) or its whole
-    workspace is gone. Called after workspace data/state updates; `wsId`
+    deleted (directly, bulk-deleted, or its recording removed from its note)
+    or its whole workspace is gone. Called after workspace data/state updates; `wsId`
     (when given) restricts the check to that workspace's fresh data so
     switching workspaces doesn't interrupt playback. */
 function stopPlayerIfGone(
@@ -76,6 +89,10 @@ function stopPlayerIfGone(
     );
   if (!stillThere) s.stopPlayer();
 }
+
+/** Test-only export of the guard; unit tests drive it with synthetic state
+    instead of mocking the Tauri event layer. */
+export const stopPlayerIfGoneForTest = stopPlayerIfGone;
 
 interface PlayerTrack {
   recordingId: string;
@@ -112,7 +129,6 @@ interface PocketStore {
   togglePlayer: () => void;
   stopPlayer: () => void;
   requestPlayerSeek: (seconds: number) => void;
-  skipPlayer: (deltaSeconds: number) => void;
   reportPlayerProgress: (time: number, duration: number, playing: boolean) => void;
   setPlayerScrubbing: (scrubbing: boolean) => void;
 
@@ -451,11 +467,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
       // stable; mid-scrub the optimistic scrub position can legitimately sit
       // near the end, and restarting then would look like "jumped to start".
       const scrubbing = get().playerScrubbing;
-      const el = document.querySelector("audio")
-        ? // The engine's element is the only <audio> in the window; prefer
-          // its real position when reachable.
-          (document.querySelector("audio") as HTMLAudioElement)
-        : null;
+      const el = audioEngineElement.current;
       const liveTime = el && Number.isFinite(el.currentTime) ? el.currentTime : playerTime;
       const ended = !scrubbing && (el?.ended ?? liveTime >= playerDuration - 0.5);
       if (ended) {
@@ -482,11 +494,6 @@ export const usePocket = create<PocketStore>((set, get) => ({
     // Optimistic: the row's waveform follows the drag immediately; the
     // audio element converges when it applies the request.
     set({ playerSeekRequest: Math.max(0, seconds), playerTime: Math.max(0, seconds) });
-  },
-
-  skipPlayer: (deltaSeconds) => {
-    if (!get().player) return;
-    set({ playerSeekRequest: Math.max(0, get().playerTime + deltaSeconds) });
   },
 
   setPlayerScrubbing: (scrubbing: boolean) => set({ playerScrubbing: scrubbing }),

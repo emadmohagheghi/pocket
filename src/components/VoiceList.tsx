@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, Trash2 } from "lucide-react";
 
-import { usePocket } from "@/store";
+import { registerAudioEngineElement, usePocket } from "@/store";
 import type { FeedActions } from "@/components/ItemList";
 import { voiceUrl } from "@/lib/api";
 import { cn, formatDuration } from "@/lib/utils";
@@ -412,7 +412,12 @@ export function VoicePlayerEngine() {
 
   return (
     <audio
-      ref={audioRef}
+      ref={(el) => {
+        audioRef.current = el;
+        // Expose the element to store logic (togglePlayer's end-of-track
+        // check) without DOM queries; cleared on unmount (player stopped).
+        registerAudioEngineElement(el);
+      }}
       src={src}
       preload="auto"
       onLoadedMetadata={(e) => {
