@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import {
   ArrowBigUp,
@@ -14,8 +14,18 @@ import {
 import { usePocket } from "@/store";
 import { AddBar, ItemList } from "@/components/ItemList";
 import { VoicePlayerEngine } from "@/components/VoiceList";
-import { SettingsDialog } from "@/components/SettingsView";
-import { WorkspacesDialog } from "@/components/WorkspaceSwitcher";
+
+// Dialogs are chunk-split and only mounted while open: their code (a few
+// hundred kB of settings + workspace UI) never loads in the common path of
+// opening the app, capturing, and closing.
+const SettingsDialog = lazy(() =>
+  import("@/components/SettingsView").then((m) => ({ default: m.SettingsDialog }))
+);
+const WorkspacesDialog = lazy(() =>
+  import("@/components/WorkspaceSwitcher").then((m) => ({
+    default: m.WorkspacesDialog,
+  }))
+);
 import { SearchBar } from "@/components/SearchBar";
 import { ImageDropOverlay } from "@/components/ImageDropOverlay";
 import { WhatsNewModal } from "@/components/WhatsNewModal";
@@ -395,8 +405,10 @@ export default function MainWindow() {
         </div>
       </div>
 
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <WorkspacesDialog open={workspacesOpen} onClose={() => setWorkspacesOpen(false)} />
+      {settingsOpen && <SettingsDialog open onClose={() => setSettingsOpen(false)} />}
+      {workspacesOpen && (
+        <WorkspacesDialog open onClose={() => setWorkspacesOpen(false)} />
+      )}
       {whatsNewVersion && (
         <WhatsNewModal version={whatsNewVersion} onDismiss={dismissWhatsNew} />
       )}
