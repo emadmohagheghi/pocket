@@ -16,8 +16,9 @@ import { cn } from "@/lib/utils";
  *   upscaled; a too-big image is contained instead.
  * - Left/right arrows page images; a thumbnail slider at the bottom shows
  *   all images and jumps on click.
- * - It closes exclusively via the X button — neither Escape nor a click on
- *   the canvas dismisses it.
+ * - A click on the backdrop (any empty canvas area) closes it, as does the
+ *   X button. Clicking the image or the controls does not dismiss it, and
+ *   Escape intentionally does not close.
  *
  * Deliberately animation-free — no mount fade, no page cross-fade: the next
  * image simply replaces the previous one. Those transitions read as lag.
@@ -74,8 +75,8 @@ export default function ImageViewerWindow() {
     };
   }, []);
 
-  // Keyboard: arrows to page. Escape intentionally does NOT close — only
-  // the X button does.
+  // Keyboard: arrows to page. Escape intentionally does NOT close — the
+  // X button or a backdrop click does.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "ArrowLeft") step(-1);
@@ -92,9 +93,14 @@ export default function ImageViewerWindow() {
   const current = state.images[index];
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden">
-      {/* Translucent dark canvas over the desktop. Clicking it does
-          nothing; the viewer closes exclusively via the X button. */}
+    // Click-anywhere-to-close lives on the root: every empty area (around
+    // the image, beside the arrows, around the thumbnail bar) closes the
+    // viewer. Interactive elements opt out via stopPropagation below.
+    <div
+      className="relative h-screen w-screen overflow-hidden"
+      onClick={close}
+    >
+      {/* Translucent dark canvas over the desktop. */}
       <div className="absolute inset-0 bg-black/60" aria-hidden />
 
       {/* Close button. Plain button: the shared Button variant animates on
@@ -115,6 +121,7 @@ export default function ImageViewerWindow() {
           src={imageUrl(current.wsId, current.file)}
           alt=""
           draggable={false}
+          onClick={(event) => event.stopPropagation()}
           className="max-h-full max-w-full rounded-lg object-contain shadow-2xl shadow-black/60"
         />
       </div>
@@ -133,6 +140,7 @@ export default function ImageViewerWindow() {
           <div
             className="flex max-w-[80vw] items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-black/40 p-2 backdrop-blur-md"
             data-tauri-drag-region="false"
+            onClick={(event) => event.stopPropagation()}
           >
             {state.images.map((image, i) => (
               <button
@@ -172,10 +180,14 @@ function ViewerArrow({
 }) {
   const Icon = side === "left" ? ChevronLeft : ChevronRight;
   // Plain button again: no press animation, no size jump while clicking.
+  // stopPropagation: paging must not bubble into the root's click-to-close.
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       aria-label={side === "left" ? "Previous image" : "Next image"}
       className={cn(
         "absolute top-1/2 z-20 grid size-12 -translate-y-1/2 place-items-center rounded-full text-white/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-white/40",

@@ -26,8 +26,7 @@ export function formatRelative(epochMs: number): string {
   return new Date(epochMs).toLocaleDateString();
 }
 
-/** Detects an URL-ish single-line string for auto-typing captured content. */
-export function looksLikeUrl(text: string): boolean {
-  const t = text.trim();
-  return /^https?:\/\/\S+$/i.test(t) || /^www\.\S+\.\S{2,}\/?\S*$/i.test(t);
+/** Ensure a scheme so the backend opener (http/https only) accepts it. */
+export function normalizeUrl(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
 }

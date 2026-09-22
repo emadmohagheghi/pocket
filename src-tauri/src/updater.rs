@@ -197,13 +197,17 @@ fn download_to_temp(app: &AppHandle, url: &str) -> AppResult<std::path::PathBuf>
 /// it in place), so Pocket reopens by itself after the update. The installer
 /// is also given `/R /ARGS <marker>` — its own restart path — so even if the
 /// watcher fails, the silent installer relaunches the app with the
-/// post-update visibility marker.
+/// post-update visibility marker. `/NS` keeps the update hands-off: the
+/// NSIS template would otherwise force-create a desktop shortcut for every
+/// silent install (the installer hooks in nsis-hooks.nsh are the second
+/// line of defense for installers run by *older* app versions).
 #[cfg(target_os = "windows")]
 fn spawn_installer(path: &std::path::Path) -> AppResult<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let installer = std::process::Command::new(path)
-        .args(["/S", "/R", "/ARGS", POST_UPDATE_LAUNCH_MARKER]) // silent install, restart app afterwards
+        // /S silent install, /NS create no shortcuts, /R restart app afterwards
+        .args(["/S", "/NS", "/R", "/ARGS", POST_UPDATE_LAUNCH_MARKER])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| AppError::Storage(format!("could not launch installer: {e}")))?;

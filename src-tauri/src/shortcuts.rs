@@ -175,6 +175,26 @@ fn grab_selected_text() -> Option<String> {
     // The target app needs a moment to service the copy.
     std::thread::sleep(std::time::Duration::from_millis(150));
 
+    // Prefer the HTML flavor when the source app copied one: it carries the
+    // formatting (bold, italics, links, lists) that plain text loses, and is
+    // converted to markdown below. Plain text remains the fallback.
+    if crate::clipboard_html::has_html() {
+        match crate::clipboard_html::read_html() {
+            Some(html) => {
+                let md = crate::clipboard_html::html_to_markdown(&html);
+                if !md.trim().is_empty() {
+                    grab_log(&format!(
+                        "grab: clipboard HTML FRESH md_len={} -> saving as markdown",
+                        md.len()
+                    ));
+                    return Some(md);
+                }
+                grab_log("grab: HTML present but converted empty -> falling back to plain");
+            }
+            None => grab_log("grab: HTML present but unreadable -> falling back to plain"),
+        }
+    }
+
     let after = read_clipboard_text();
     match after {
         Some(t) if !t.trim().is_empty() => {

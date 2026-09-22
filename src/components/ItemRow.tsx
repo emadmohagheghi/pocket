@@ -14,8 +14,9 @@ import {
 import { usePocket } from "@/store";
 import type { FeedActions } from "@/components/ItemList";
 import { NoteImages } from "@/components/NoteImages";
+import { NoteText } from "@/components/NoteText";
 import { NoteVoicePlayer } from "@/components/VoiceList";
-import { cn, looksLikeUrl } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -69,7 +70,7 @@ export function ItemRow({
   const [localEditing, setLocalEditing] = useState(false);
   const [draft, setDraft] = useState(item.content);
   const rowRef = useRef<HTMLLIElement>(null);
-  const previewRef = useRef<HTMLParagraphElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const collapseEnabled = previewLineLimit > 0;
   const canCollapse = collapseEnabled && isExpandable;
@@ -201,10 +202,6 @@ export function ItemRow({
     }
   };
 
-  // Link rendering is purely visual: any text item that *is* a URL renders
-  // as a clickable link. Detected at render time, never persisted as a type.
-  const isLink = looksLikeUrl(item.content) || (item.url !== null && looksLikeUrl(item.url));
-
   // One shared editing field: the whole card becomes the textarea.
   const editField = (
     <Textarea
@@ -253,6 +250,7 @@ export function ItemRow({
         <ContextMenuShortcut>⌃C</ContextMenuShortcut>
       </ContextMenuItem>
       <ContextMenuItem
+        disabled={!actions.canCopyAsList}
         onSelect={() => {
           ensureSelected();
           actions.copySelected(true);
@@ -290,7 +288,7 @@ export function ItemRow({
         <ContextMenuShortcut>⏎</ContextMenuShortcut>
       </ContextMenuItem>
       <ContextMenuItem
-        disabled={actions.selectedTextIds.length < 2}
+        disabled={!actions.canMerge}
         onSelect={() => {
           actions.mergeSelected();
         }}
@@ -381,7 +379,6 @@ export function ItemRow({
               canCollapse={canCollapse}
               collapseEnabled={collapseEnabled}
               previewStyle={previewStyle}
-              isLink={isLink}
               expanded={expanded}
               setExpanded={setExpanded}
               previewRef={previewRef}
@@ -402,7 +399,6 @@ function ItemBody({
   canCollapse,
   collapseEnabled,
   previewStyle,
-  isLink,
   expanded,
   setExpanded,
   previewRef,
@@ -413,10 +409,9 @@ function ItemBody({
   canCollapse: boolean;
   collapseEnabled: boolean;
   previewStyle: { WebkitLineClamp: number } | undefined;
-  isLink: boolean;
   expanded: boolean;
   setExpanded: (value: boolean | ((current: boolean) => boolean)) => void;
-  previewRef: React.RefObject<HTMLParagraphElement | null>;
+  previewRef: React.RefObject<HTMLDivElement | null>;
   wsId: string;
 }) {
   const open = expanded;
@@ -431,23 +426,21 @@ function ItemBody({
             open={open}
             setExpanded={setExpanded}
             previewStyle={previewStyle}
-            isLink={isLink}
             previewRef={previewRef}
           />
         ) : (
-          <p
+          <div
             ref={previewRef}
             dir="auto"
             style={previewStyle}
             className={cn(
               "whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [overflow-wrap:anywhere]",
               collapseEnabled && "overflow-hidden [display:-webkit-box] [-webkit-box-orient:vertical]",
-              done && "text-muted-foreground line-through",
-              isLink && !done && "text-primary underline-offset-2 hover:underline"
+              done && "text-muted-foreground line-through"
             )}
           >
-            {item.content}
-          </p>
+            <NoteText text={item.content} done={done} />
+          </div>
         )
       ) : null}
       {item.recording && (
@@ -465,7 +458,6 @@ function CollapsibleItemBody({
   open,
   setExpanded,
   previewStyle,
-  isLink,
   previewRef,
 }: {
   item: Item;
@@ -473,13 +465,12 @@ function CollapsibleItemBody({
   open: boolean;
   setExpanded: (value: boolean | ((current: boolean) => boolean)) => void;
   previewStyle: { WebkitLineClamp: number } | undefined;
-  isLink: boolean;
-  previewRef: React.RefObject<HTMLParagraphElement | null>;
+  previewRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <Collapsible open={open} onOpenChange={setExpanded}>
       <div className="grid min-w-0">
-        <p
+        <div
           ref={previewRef}
           dir="auto"
           aria-hidden={open}
@@ -487,27 +478,25 @@ function CollapsibleItemBody({
           className={cn(
             "col-start-1 row-start-1 self-start overflow-hidden whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [overflow-wrap:anywhere] transition-opacity duration-150",
             open && "pointer-events-none opacity-0",
-            done && "text-muted-foreground line-through",
-            isLink && !done && "text-primary underline-offset-2 hover:underline"
+            done && "text-muted-foreground line-through"
           )}
         >
-          {item.content}
-        </p>
+          <NoteText text={item.content} done={done} />
+        </div>
 
         <CollapsibleContent
           aria-hidden={!open}
           className="col-start-1 row-start-1 min-h-0 min-w-0 self-start overflow-hidden data-[state=closed]:pointer-events-none data-[state=closed]:animate-[pocket-collapsible-up_180ms_ease-in] data-[state=open]:animate-[pocket-collapsible-down_220ms_ease-out] motion-reduce:animate-none"
         >
-          <p
+          <div
             dir="auto"
             className={cn(
               "whitespace-pre-wrap text-sm font-normal leading-5 text-foreground [overflow-wrap:anywhere]",
-              done && "text-muted-foreground line-through",
-              isLink && !done && "text-primary underline-offset-2 hover:underline"
+              done && "text-muted-foreground line-through"
             )}
           >
-            {item.content}
-          </p>
+            <NoteText text={item.content} done={done} />
+          </div>
         </CollapsibleContent>
       </div>
 

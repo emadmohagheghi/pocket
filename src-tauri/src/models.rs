@@ -169,6 +169,20 @@ pub struct ItemPatch {
     pub recording_id: Option<Option<String>>,
 }
 
+/// Result of a multi-note merge. The frontend records the inverse of this
+/// as ONE undo action: restore `target`'s previous shape + re-create each
+/// `removed` note + pull each `released` recording back out of the feed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeOutcome {
+    /// The surviving (oldest) note, post-merge.
+    pub target: Item,
+    /// The source notes that were folded into the target and deleted.
+    pub removed: Vec<Item>,
+    /// Voice notes that left their source notes and are now standalone.
+    pub released: Vec<Recording>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {

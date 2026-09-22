@@ -121,8 +121,8 @@ pub fn frontend_ready(app: AppHandle) -> AppResult<()> {
 
     // A relaunch straight after a self-update always shows the window: the
     // user asked for the update, so opening into the tray looks broken.
-    let post_update_launch = std::env::args()
-        .any(|arg| arg == crate::updater::POST_UPDATE_LAUNCH_MARKER);
+    let post_update_launch =
+        std::env::args().any(|arg| arg == crate::updater::POST_UPDATE_LAUNCH_MARKER);
 
     if show_was_requested || !start_minimized || post_update_launch {
         show_main_window_now(&app);
@@ -476,6 +476,25 @@ pub fn apply_undo(app: AppHandle, steps: Vec<UndoStep>) -> AppResult<()> {
     Ok(())
 }
 
+/// Merge several selected notes into their oldest one in one atomic
+/// backend operation — text concatenates, images move, embedded voices are
+/// released to the feed. Media is never parked or trashed, so undo is
+/// metadata-only and lossless.
+#[tauri::command]
+pub fn merge_items(
+    app: AppHandle,
+    workspace_id: String,
+    source_ids: Vec<String>,
+) -> AppResult<MergeOutcome> {
+    let outcome = {
+        let store = app.state::<Mutex<Store>>();
+        let mut store = store.lock().unwrap();
+        store.merge_items(&workspace_id, &source_ids)?
+    };
+    items_changed(&app, &workspace_id);
+    Ok(outcome)
+}
+
 #[tauri::command]
 pub fn update_item(
     app: AppHandle,
@@ -609,10 +628,9 @@ pub fn save_image(app: AppHandle, request: tauri::ipc::Request) -> AppResult<Ite
         store.save_image(workspace_id, ext, &bytes)
     };
     match &result {
-        Ok(img) => crate::shortcuts::debug_log(&format!(
-            "save_image ok id={} file={}",
-            img.id, img.file
-        )),
+        Ok(img) => {
+            crate::shortcuts::debug_log(&format!("save_image ok id={} file={}", img.id, img.file))
+        }
         Err(e) => crate::shortcuts::debug_log(&format!("save_image FAILED: {e}")),
     }
     result
@@ -762,6 +780,14 @@ pub fn copy_to_clipboard(app: AppHandle, text: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Frontend helper for rich paste: converts an HTML flavor to markdown with
+/// the same engine the capture grab uses, so both entry points produce
+/// identical notes. Returns an empty string when there is nothing to keep.
+#[tauri::command]
+pub fn convert_html_to_markdown(html: String) -> String {
+    crate::clipboard_html::html_to_markdown(&html)
+}
+
 // ------------------------------------------------------------------ settings
 
 #[tauri::command]
@@ -849,6 +875,140 @@ pub fn apply_always_on_top(app: &AppHandle) {
     }
 }
 
+/// True when this binary is a debug/dev build. Debug builds must never be
+/// registered for OS autostart: they carry a console subsystem (a terminal
+/// window flashes on every boot) and need a dev server for their UI.
+fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[cfg(windows)]
+fn autostart_entry_is_dev_build(path: &str) -> bool {
+    path.contains("\\target\\debug\\") || path.contains("/target/debug/")
+}
+
+/// Reads the value the autostart plugin maintains for Pocket under the
+/// per-user `Run` key. `None` when the entry is absent or unreadable.
+#[cfg(windows)]
+fn autostart_entry_path() -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, REG_ROUTINE_FLAGS, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_REG_SZ,
+    };
+
+    const RUN_KEY: PCWSTR =
+        windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    const VALUE_NAME: PCWSTR = windows::core::w!("Pocket");
+
+    let mut buf = [0u16; 1024];
+    let mut len: u32 = (buf.len() * 2) as u32;
+    let mut value_type = REG_VALUE_TYPE(0);
+    let read = unsafe {
+        RegGetValueW(
+            windows::Win32::System::Registry::HKEY_CURRENT_USER,
+            RUN_KEY,
+            VALUE_NAME,
+            REG_ROUTINE_FLAGS(RRF_RT_REG_SZ.0 | RRF_NOEXPAND.0),
+            Some(&mut value_type),
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    if read != ERROR_SUCCESS {
+        return None;
+    }
+    Some(
+        String::from_utf16_lossy(&buf[..(len as usize / 2)])
+            .trim_end_matches('\0')
+            .to_string(),
+    )
+}
+
+/// A dev build can never re-point the OS entry at the installed build via the
+/// plugin (it always registers `current_exe`), so patch the registry value
+/// directly: replace a stale dev-build path with the installed
+/// `%LOCALAPPDATA%\Pocket\pocket.exe`. Returns `true` only when the entry was
+/// actually rewritten. Never creates an entry and never blocks startup.
+#[cfg(windows)]
+fn repair_autostart_to_installed_build() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_SZ,
+    };
+
+    const RUN_KEY: PCWSTR =
+        windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    const VALUE_NAME: PCWSTR = windows::core::w!("Pocket");
+
+    // Only ever point the entry at the installed per-user build.
+    let Ok(local_app_data) = std::env::var("LOCALAPPDATA") else {
+        return false;
+    };
+    let installed = std::path::PathBuf::from(local_app_data)
+        .join("Pocket")
+        .join("pocket.exe");
+    if !installed.is_file() {
+        return false;
+    }
+    let installed_str = installed.to_string_lossy().to_string();
+
+    // Rewrite only when the entry really points at a dev build (never clobber
+    // an entry the user or another tool wrote).
+    match autostart_entry_path() {
+        Some(current) if autostart_entry_is_dev_build(&current) => {}
+        _ => return false,
+    }
+
+    let data: Vec<u16> = format!("{installed_str}\0").encode_utf16().collect();
+    let data_bytes =
+        unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 2) };
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, None, KEY_SET_VALUE, &mut hkey)
+            != ERROR_SUCCESS
+        {
+            return false;
+        }
+        let set = RegSetValueExW(hkey, VALUE_NAME, None, REG_SZ, Some(data_bytes));
+        let _ = RegCloseKey(hkey);
+        if set == ERROR_SUCCESS {
+            eprintln!("[pocket] autostart re-pointed to the installed build: {installed_str:?}");
+            true
+        } else {
+            eprintln!("[pocket] failed to repair autostart entry: {set:?}");
+            false
+        }
+    }
+}
+
+/// Windows-only guard for dev builds: enforce that no autostart entry points
+/// at a dev binary, while never touching an entry that already points at the
+/// installed build (that registration belongs to the installed app).
+/// - entry is a dev path, setting on, installed build present → re-point it
+/// - entry is a dev path otherwise → remove it
+/// - entry absent or healthy → untouched
+#[cfg(windows)]
+fn dev_build_autostart_guard(app: &AppHandle, enabled: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let Some(entry) = autostart_entry_path() else {
+        return;
+    };
+    if !autostart_entry_is_dev_build(&entry) {
+        return;
+    }
+    if enabled && repair_autostart_to_installed_build() {
+        return;
+    }
+    if let Err(e) = app.autolaunch().disable() {
+        eprintln!("[pocket] failed to remove dev-build autostart entry: {e}");
+    } else {
+        eprintln!("[pocket] removed dev-build autostart registration");
+    }
+}
+
 /// Sync the OS autostart registration with the persisted setting.
 pub fn apply_autostart(app: &AppHandle) {
     use tauri_plugin_autostart::ManagerExt;
@@ -857,6 +1017,14 @@ pub fn apply_autostart(app: &AppHandle) {
         let guard = store.lock().unwrap();
         guard.settings.launch_on_startup
     };
+    if is_debug_build() {
+        // Dev sessions never (re)register autostart — that is how a console
+        // subsystem dev binary once ended up in the Run key, opening a
+        // terminal window on every boot. They only clean a dev-path entry up.
+        #[cfg(windows)]
+        dev_build_autostart_guard(app, enabled);
+        return;
+    }
     let autolaunch = app.autolaunch();
     let is_enabled = autolaunch.is_enabled().unwrap_or(false);
     let result = if enabled && !is_enabled {

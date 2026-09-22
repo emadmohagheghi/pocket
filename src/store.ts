@@ -51,6 +51,49 @@ export type UndoStep =
 
 const UNDO_HISTORY_LIMIT = 10;
 
+/** The voice engine's <audio> element, registered by VoicePlayerEngine on
+    mount. Deliberately kept out of the store state: elements are not
+    serializable and never need to trigger re-renders. Lets store logic
+    (e.g. togglePlayer's end-of-track heuristic) reach the real element
+    without fragile DOM queries. */
+const audioEngineElement: { current: HTMLAudioElement | null } = {
+  current: null,
+};
+
+export function registerAudioEngineElement(el: HTMLAudioElement | null) {
+  audioEngineElement.current = el;
+}
+
+/** Stop shared playback when its track no longer exists: the recording was
+    deleted (directly, bulk-deleted, or its recording removed from its note)
+    or its whole workspace is gone. Called after workspace data/state updates; `wsId`
+    (when given) restricts the check to that workspace's fresh data so
+    switching workspaces doesn't interrupt playback. */
+function stopPlayerIfGone(
+  s: Pick<PocketStore, "player" | "data" | "workspaces" | "stopPlayer">,
+  wsId?: string
+) {
+  const player = s.player;
+  if (!player) return;
+  if (wsId === undefined) {
+    // Workspace-level check only (state-changed): `data` here may belong to
+    // any workspace, so a recording lookup would be meaningless.
+    if (!s.workspaces.some((w) => w.id === player.wsId)) s.stopPlayer();
+    return;
+  }
+  if (wsId !== player.wsId || !s.data) return;
+  const stillThere =
+    s.data.recordings.some((r) => r.id === player.recordingId) ||
+    s.data.items.some(
+      (i) => i.recording && i.recording.id === player.recordingId
+    );
+  if (!stillThere) s.stopPlayer();
+}
+
+/** Test-only export of the guard; unit tests drive it with synthetic state
+    instead of mocking the Tauri event layer. */
+export const stopPlayerIfGoneForTest = stopPlayerIfGone;
+
 interface PlayerTrack {
   recordingId: string;
   name: string;
@@ -86,7 +129,6 @@ interface PocketStore {
   togglePlayer: () => void;
   stopPlayer: () => void;
   requestPlayerSeek: (seconds: number) => void;
-  skipPlayer: (deltaSeconds: number) => void;
   reportPlayerProgress: (time: number, duration: number, playing: boolean) => void;
   setPlayerScrubbing: (scrubbing: boolean) => void;
 
@@ -108,6 +150,10 @@ interface PocketStore {
   ) => Promise<Item | null>;
   updateItem: (itemId: string, patch: Partial<Item>) => Promise<void>;
   deleteItem: (itemId: string) => Promise<void>;
+  /** Merge several notes into their oldest one (atomic backend op).
+      Returns false when the merge was rejected (e.g. it would combine
+      text, images and a voice note in one note). */
+  mergeItems: (sourceIds: string[]) => Promise<boolean>;
   /** Toggle the todo-style done state (backed by the legacy `pinned`
       flag, which is no longer used for pinning). Works for both text
       items and voice recordings. */
@@ -156,6 +202,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             const prevActive = get().settings?.activeWorkspaceId;
             const { settings, workspaces } = e.payload;
             set({ settings, workspaces });
+            stopPlayerIfGone(get());
             if (settings.activeWorkspaceId !== prevActive) {
               void get().refreshItems();
             }
@@ -165,6 +212,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
             (e) => {
               if (e.payload.workspaceId === get().settings?.activeWorkspaceId) {
                 set({ data: normalizeWorkspaceData(e.payload.data) });
+                stopPlayerIfGone(get(), e.payload.workspaceId);
               }
             }
           ),
@@ -209,6 +257,7 @@ export const usePocket = create<PocketStore>((set, get) => ({
     try {
       const data = await api.getItems(wsId);
       set({ data: normalizeWorkspaceData(data) });
+      stopPlayerIfGone(get(), wsId);
     } catch (e) {
       void api.log(`refreshItems FAILED: ${errMessage(e)}`);
     }
@@ -306,6 +355,37 @@ export const usePocket = create<PocketStore>((set, get) => ({
       }
     } catch (e) {
       void api.log(`deleteItem FAILED: ${errMessage(e)}`);
+    }
+  },
+
+  mergeItems: async (sourceIds) => {
+    const wsId = get().settings?.activeWorkspaceId;
+    if (!wsId) return false;
+    try {
+      const outcome = await api.mergeItems(wsId, sourceIds);
+      // One undo action, in apply_undo's reverse-merge order: pull each
+      // released voice out of the feed, re-create each folded source note
+      // (its snapshot still embeds the voice), then restore the target's
+      // previous shape. No media files were parked or trashed, so this is
+      // metadata-only and lossless.
+      get().recordUndo([
+        ...outcome.released.map(
+          (r) =>
+            ({ type: "removeRecording", workspaceId: wsId, recordingId: r.id }) as UndoStep
+        ),
+        ...outcome.removed.map(
+          (item) => ({ type: "restoreItem", workspaceId: wsId, item }) as UndoStep
+        ),
+        {
+          type: "restoreItem",
+          workspaceId: wsId,
+          item: get().data?.items.find((i) => i.id === outcome.target.id) ?? outcome.target,
+        },
+      ]);
+      return true;
+    } catch (e) {
+      void api.log(`mergeItems FAILED: ${errMessage(e)}`);
+      return false;
     }
   },
 
@@ -412,9 +492,24 @@ export const usePocket = create<PocketStore>((set, get) => ({
   togglePlayer: () => {
     const { player, playerPlaying, playerTime, playerDuration } = get();
     if (!player) return;
-    if (!playerPlaying && playerDuration > 0 && playerTime >= playerDuration - 0.5) {
-      // Ended track: restart from the beginning instead of stalling at the end.
-      set({ playerPlaying: true, playerSeekRequest: 0 });
+    if (
+      !playerPlaying &&
+      playerDuration > 0 &&
+      playerTime >= playerDuration - 0.5
+    ) {
+      // Ended track: restart from the beginning instead of stalling at the
+      // end. The playerTime heuristic is only trusted while playback is
+      // stable; mid-scrub the optimistic scrub position can legitimately sit
+      // near the end, and restarting then would look like "jumped to start".
+      const scrubbing = get().playerScrubbing;
+      const el = audioEngineElement.current;
+      const liveTime = el && Number.isFinite(el.currentTime) ? el.currentTime : playerTime;
+      const ended = !scrubbing && (el?.ended ?? liveTime >= playerDuration - 0.5);
+      if (ended) {
+        set({ playerPlaying: true, playerSeekRequest: 0 });
+      } else {
+        set({ playerPlaying: !playerPlaying });
+      }
     } else {
       set({ playerPlaying: !playerPlaying });
     }
@@ -434,11 +529,6 @@ export const usePocket = create<PocketStore>((set, get) => ({
     // Optimistic: the row's waveform follows the drag immediately; the
     // audio element converges when it applies the request.
     set({ playerSeekRequest: Math.max(0, seconds), playerTime: Math.max(0, seconds) });
-  },
-
-  skipPlayer: (deltaSeconds) => {
-    if (!get().player) return;
-    set({ playerSeekRequest: Math.max(0, get().playerTime + deltaSeconds) });
   },
 
   setPlayerScrubbing: (scrubbing: boolean) => set({ playerScrubbing: scrubbing }),

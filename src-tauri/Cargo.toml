@@ -1,6 +1,6 @@
 [package]
 name = "pocket"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["Pocket contributors"]
 description = "A lightweight, privacy-first Windows companion for capturing text and voice notes."
@@ -28,6 +28,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 zip = { version = "=8.6.0", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls"] }
+htmd = "0.5.5"
 
 [target."cfg(windows)".dependencies]
 webview2-com = "0.38"
@@ -40,6 +41,7 @@ windows = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
+    "Win32_System_Registry",
 ] }
 
 [profile.release]

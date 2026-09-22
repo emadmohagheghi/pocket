@@ -97,14 +97,17 @@ export interface FeedActions {
   moveSelectedTo: (workspaceId: string, workspaceName: string) => void;
   deleteSelected: () => void;
   selectedTextIds: string[];
+  /** ≥2 text notes selected: the merge would fold into a valid target. */
+  canMerge: boolean;
+  /** ≥2 selected entries with text content to copy. */
+  canCopyAsList: boolean;
 }
 
 export function ItemList() {
   const data = usePocket((s) => s.data);
   const focusItemId = usePocket((s) => s.focusItemId);
   const setEntryDone = usePocket((s) => s.setEntryDone);
-  const updateItem = usePocket((s) => s.updateItem);
-  const deleteItem = usePocket((s) => s.deleteItem);
+  const mergeItems = usePocket((s) => s.mergeItems);
   const recordUndo = usePocket((s) => s.recordUndo);
   const undo = usePocket((s) => s.undo);
   const wsId = usePocket((s) => s.settings?.activeWorkspaceId ?? "");
@@ -143,6 +146,35 @@ export function ItemList() {
             e.kind === "text" && selectedIds.has(e.key)
         )
         .map((e) => e.item.id),
+    [entries, selectedIds]
+  );
+
+  /** Merge needs ≥2 text notes AND a shape the backend accepts: the merged
+      note must not end up holding text, images and a voice note at once.
+      Standalone voices selected alongside notes are left untouched and don't
+      count. Mirrors merge_items' validation exactly, so the menu item is
+      disabled precisely when the merge would be rejected. */
+  const canMerge = useMemo(() => {
+    const notes = entries.filter(
+      (e): e is { key: string; kind: "text"; item: Item } =>
+        e.kind === "text" && selectedIds.has(e.key)
+    );
+    if (notes.length < 2) return false;
+    const hasText = notes.some((e) => e.item.content.trim() !== "");
+    const hasImages = notes.some((e) => e.item.images.length > 0);
+    const hasVoice = notes.some((e) => e.item.recording !== null);
+    return !(hasText && hasImages && hasVoice);
+  }, [entries, selectedIds]);
+
+  /** Copy-as-List numbers the copied entries, which only reads as a list
+      when at least two entries carry text to copy. */
+  const canCopyAsList = useMemo(
+    () =>
+      entries.filter(
+        (e) =>
+          selectedIds.has(e.key) &&
+          (e.kind === "text" ? e.item.content.trim() !== "" : true)
+      ).length >= 2,
     [entries, selectedIds]
   );
 
@@ -221,35 +253,25 @@ export function ItemList() {
   }, []);
 
   const mergeSelected = useCallback(() => {
-    if (selectedTextIds.length < 2) return;
-    const selected = entries.filter(
-      (e): e is { key: string; kind: "text"; item: Item } =>
-        e.kind === "text" && selectedIds.has(e.key)
-    );
-    // Oldest note is the merge target so its position in the feed holds.
-    const ordered = [...selected].sort((a, b) => a.item.createdAt - b.item.createdAt);
-    const merged = ordered.map((e) => e.item.content.trim()).join("\n\n");
-    const undoSteps: UndoStep[] = ordered
-      .slice(1)
-      .map((e) => ({ type: "restoreItem", workspaceId: wsId, item: e.item }) as UndoStep);
-    const prevTarget = ordered[0].item;
-    void updateItem(ordered[0].item.id, { content: merged }).then(() => {
-      // updateItem records its own "restore previous" step; re-record the
-      // whole merge as one action so Ctrl+Z reverts everything at once.
-      usePocket.setState((s) => ({
-        undoHistory: [
-          ...s.undoHistory.slice(0, -1),
-          [
-            { type: "restoreItem", workspaceId: wsId, item: prevTarget } as UndoStep,
-            ...undoSteps,
-          ],
-        ],
-      }));
+    // One atomic backend operation: text folds into the oldest note, images
+    // move to it, and any embedded voice notes are released to the feed —
+    // media files are never parked or trashed, so Ctrl+Z is lossless.
+    // Standalone voice notes in the selection are left untouched.
+    const noteIds = entries
+      .filter(
+        (e): e is { key: string; kind: "text"; item: Item } =>
+          e.kind === "text" && selectedIds.has(e.key)
+      )
+      .map((e) => e.item.id);
+    if (noteIds.length < 2) return;
+    void mergeItems(noteIds).then((ok) => {
+      // !ok only happens if the selection changed between open and click
+      // (the store already logged it); the disabled item is the UX contract.
+      if (!ok) return;
+      toast.add({ title: "Notes Merged", type: "success" });
     });
-    for (const e of ordered.slice(1)) void deleteItem(e.item.id);
-    toast.add({ title: "Notes Merged", type: "success" });
     setSelectedIds(new Set());
-  }, [entries, selectedIds, selectedTextIds, updateItem, deleteItem, recordUndo, wsId]);
+  }, [entries, selectedIds, mergeItems]);
 
   const deleteSelected = useCallback(() => {
     if (selectedIds.size === 0) return;
@@ -360,10 +382,10 @@ export function ItemList() {
         copySelected(false);
       } else if (mod && e.shiftKey && e.code === "KeyC") {
         e.preventDefault();
-        copySelected(true);
+        if (canCopyAsList) copySelected(true);
       } else if (mod && e.shiftKey && e.code === "KeyM") {
         e.preventDefault();
-        mergeSelected();
+        if (canMerge) mergeSelected();
       } else if (e.code === "Space") {
         e.preventDefault();
         toggleDoneSelected();
@@ -390,6 +412,8 @@ export function ItemList() {
     clearSelection,
     deleteSelected,
     undo,
+    canMerge,
+    canCopyAsList,
   ]);
 
   const actions: FeedActions = {
@@ -404,6 +428,8 @@ export function ItemList() {
     moveSelectedTo,
     deleteSelected,
     selectedTextIds,
+    canMerge,
+    canCopyAsList,
   };
 
   const renderEntry = (entry: FeedEntry) =>
@@ -649,6 +675,31 @@ export function AddBar({ staging }: { staging: StagingApi }) {
                 } else if (event.key === "Escape") {
                   setValue("");
                 }
+              }}
+              onPaste={(event) => {
+                // Rich paste: when the source provides an HTML flavor (browsers,
+                // Word, editors), convert it to markdown with the backend's
+                // engine so captured and pasted notes render identically.
+                // Plain-text-only sources fall through to the default insert.
+                const html = event.clipboardData.getData("text/html");
+                if (!html.trim()) return;
+                event.preventDefault();
+                void api
+                  .convertHtmlToMarkdown(html)
+                  .then((md) => {
+                    const insert = md || event.clipboardData.getData("text/plain");
+                    if (!insert) return;
+                    const target = event.currentTarget;
+                    const start = target.selectionStart ?? value.length;
+                    const end = target.selectionEnd ?? value.length;
+                    const next = value.slice(0, start) + insert + value.slice(end);
+                    setValue(next);
+                    // Caret lands after the inserted markdown.
+                    requestAnimationFrame(() => {
+                      const pos = start + insert.length;
+                      target.setSelectionRange(pos, pos);
+                    });
+                  });
               }}
               placeholder="Add a note or a prompt…"
               aria-label="Add a text item"
