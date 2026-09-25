@@ -684,22 +684,30 @@ export function AddBar({ staging }: { staging: StagingApi }) {
                 const html = event.clipboardData.getData("text/html");
                 if (!html.trim()) return;
                 event.preventDefault();
+                // The synthetic event (and its currentTarget) is nulled once
+                // this handler returns, so everything the async continuation
+                // needs must be captured here — including a stable ref to the
+                // textarea for the caret restore below.
+                const fallback = event.clipboardData.getData("text/plain");
+                const target = textareaRef.current;
+                if (!target) return;
                 void api
                   .convertHtmlToMarkdown(html)
                   .then((md) => {
-                    const insert = md || event.clipboardData.getData("text/plain");
+                    const insert = md || fallback;
                     if (!insert) return;
-                    const target = event.currentTarget;
-                    const start = target.selectionStart ?? value.length;
-                    const end = target.selectionEnd ?? value.length;
-                    const next = value.slice(0, start) + insert + value.slice(end);
-                    setValue(next);
+                    const start = target.selectionStart ?? 0;
+                    const end = target.selectionEnd ?? 0;
+                    // Functional update: keystrokes typed while the conversion
+                    // round-trips are preserved instead of clobbered.
+                    setValue((prev) => prev.slice(0, start) + insert + prev.slice(end));
                     // Caret lands after the inserted markdown.
                     requestAnimationFrame(() => {
                       const pos = start + insert.length;
                       target.setSelectionRange(pos, pos);
                     });
-                  });
+                  })
+                  .catch((error) => api.log(`rich paste conversion FAILED: ${error}`));
               }}
               placeholder="Add a note or a prompt…"
               aria-label="Add a text item"
